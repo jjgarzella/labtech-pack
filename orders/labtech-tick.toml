@@ -1,0 +1,30 @@
+# labtech-tick — the trigger that fires one Lab Tech cycle (Lab Tech v1, mx-7co.5).
+#
+# An order pairs a TRIGGER with an ACTION. The action is the `labtech-tick`
+# formula (formulas/labtech-tick.toml); each fire pours an ephemeral wisp that
+# does exactly ONE tick and exits. All durable state lives in beads + harvest
+# files, so a dropped tick is safe — the next fire starts a clean cycle.
+#
+# TRIGGER = manual (v1, step 8). `gc order run labtech-tick` instantiates the
+# formula on demand — this is the mx-7co.5 acceptance gate ("manual gc order run
+# executes one full cycle"). A manual trigger never auto-fires, so importing the
+# pack does not start a schedule on its own.
+#
+# STEP 9 (mx-7co.6) flips this to the autonomous cron and wires the rig:
+#   - submodule packs/labtech behind a private remote; add
+#     [rigs.imports.labtech] source = "packs/labtech" to the math-experiments rig
+#     (without that import the rig can't see this order/formula yet);
+#   - change the two lines below to the 8-hourly schedule (the pack-level
+#     adjustable cadence knob from the epic, Q10):
+#         trigger  = "cron"
+#         schedule = "0 */8 * * *"
+#   - set `pool`/target to the rig's tick worker (e.g. the math-experiments
+#     polecat pool the work beads route to: math-experiments/gasvillage.polecat),
+#     so the fired wisp runs with GC_BEAD_ID + GC_AGENT injected.
+# The formula carries its own knobs (concurrency cap N, seed_N, lab_book id,
+# paths) in [vars]; this file owns only WHEN the tick fires and WHERE it routes.
+
+[order]
+description = "Lab Tech tick — one autonomous experiment-runner cycle (manual until step-9 cron wiring, mx-7co.6)"
+formula = "labtech-tick"
+trigger = "manual"

@@ -1,0 +1,10 @@
+# Python bytecode from the bin/ helpers
+__pycache__/
+*.pyc
+
+# Lab Tech runtime state is RIG-LOCAL (lives under the rig's labtech_home, not in
+# the pack), but ignore it here too in case anyone runs a tick from inside the
+# pack dir during development.
+runs/
+harvest/
+state/

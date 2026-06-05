@@ -1,0 +1,39 @@
+# labtech — the Lab Tech autonomous experiment-runner pack (Gas City).
+#
+# Lab Tech dispatches math experiments, tracks them across cycles, and
+# synthesizes results — without ever being told "done". It infers progress by
+# diffing a results "DB" (harvest) across cycles and watching a goal's progress
+# metric climb, then plateau. It is project-agnostic and rides the
+# math-experiments rig (Q9), serving any rig that imports it.
+#
+# ## What this pack OWNS (logic + templates)
+#   formulas/labtech-tick.toml   the one-tick cycle (graph.v2): orient -> reap ->
+#                                harvest-diff -> lab-book digest -> dispatch -> exit
+#   orders/labtech-tick.toml     the trigger that fires the formula (manual here;
+#                                step-9 / mx-7co.6 flips it to the 8-hourly cron)
+#   prompts/tick.template.md     the Lab Tech "brains" framing the formula reads
+#   bin/resolve_command.py       render a catalog `command` template -> a concrete line
+#   bin/progress_metric.py       count distinct result-keys in a harvest snapshot
+#   reference/                   reference copies of the rig-local runner/harvest
+#                                contract scripts (a starting point for new rigs)
+#
+# ## What the RIG owns (catalog + runners + runtime state), e.g. labtech/ :
+#   experiments.toml             the menu of runnable experiments (Q4/Q5 OPTION A)
+#   dispatch.sh / ping.sh / harvest.sh   the exec contract; networking lives HERE,
+#                                never in the pack (Q7)
+#   run_wrapper.sh / run_experiment.*    the experiment engine + networking wrapper
+#   runs/ harvest/ state/        runtime state (gitignored)
+#
+# The pack stays networking-free: it only renders text and shells out to the
+# rig-local contract scripts. See README.md for the full picture and the wiring
+# seam handed to step 9 (submodule + private remote + [rigs.imports.labtech]).
+#
+# Import into a rig via city.toml (step 9, mx-7co.6):
+#   [[rigs]]
+#   name = "math-experiments"
+#   [rigs.imports.labtech]
+#   source = "packs/labtech"
+
+[pack]
+name = "labtech"
+schema = 2

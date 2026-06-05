@@ -1,0 +1,457 @@
+description = """
+Lab Tech tick — one autonomous experiment-runner cycle (Lab Tech v1, mx-7co.5).
+
+Lab Tech is NOT an always-on session. It is a cron-triggered formula `order`
+(`orders/labtech-tick.toml`, like `mol-dog-stale-db`). Each fire pours an ephemeral
+wisp that does exactly ONE tick and exits. All durable state lives in beads (the
+lab-book + experiment beads) and on disk (harvest snapshots) — never in the wisp's
+head, never in agent context.
+
+## What one tick does
+
+    orient -> reap (ping in-flight, pin exited) -> harvest -> diff vs last cycle
+           -> lab-book digest -> dispatch under the N cap -> exit
+
+Lab Tech is *never told "done"*. It infers progress by diffing harvests across
+cycles and watching the goal's progress metric climb, then plateau (Q1).
+
+## The data model it operates (read the brains prompt too: {{labtech_pack}}/prompts/tick.template.md)
+
+- **lab-book** (`{{lab_book}}`): Lab-Tech-owned root, ONE per rig, outlives every
+  goal-group. Experiment beads attach as its children. It holds the per-cycle
+  harvest digests + cross-cycle synthesis. (mx-7co.4)
+- **experiment** bead: one per dispatched run. `run_id == the bead id`. Parent =
+  the lab-book. Links to the goal it served via `goal_id`/`goal_group_id` metadata.
+  Lifecycle = **PINNED, not closed**: running = status open; exited = `pinned=1`
+  (permanent, auditable, auto-hidden from work views and from the in-flight count).
+- **goal-group / goal**: crew-authored, **READ-ONLY to Lab Tech**. The goal body +
+  metadata name the results `table`, the `filter`, and the `uniqueness_key` that
+  define progress. Lab Tech serves goals; it never edits them.
+
+## Three contracts it shells out to (rig-local, mx-7co.2; networking lives in them)
+
+    {{labtech_home}}/dispatch.sh <run_id> <resolved-command>   # nohup detach, pidfile
+    {{labtech_home}}/ping.sh     <run_id>                      # exit 0 alive / 1 exited
+    {{labtech_home}}/harvest.sh  <cycle> <table>               # dump table -> harvest/<cycle>.json
+
+and the catalog (`{{labtech_home}}/experiments.toml`, mx-7co.3) is the menu of runnable
+experiments. Two pack-owned helpers turn catalog + goal into concrete actions:
+
+    {{labtech_pack}}/bin/resolve_command.py   # render the catalog `command` template
+    {{labtech_pack}}/bin/progress_metric.py   # count distinct result-keys in a harvest
+
+## Concurrency (Q8)
+
+Single rig-global cap, `concurrency = {{concurrency}}` (default 1). In-flight = count of
+OPEN, non-pinned experiment children of the lab-book. At the cap, this tick skips
+dispatch — there is no queue; the next tick is the retry.
+
+## Baseline caveat (mx-7co.5)
+
+The results table is NON-EMPTY at v1 start. The first tick's harvest is the BASELINE;
+only distinct keys that appear AFTER it count as Lab Tech's progress. The diff step
+subtracts the baseline so pre-existing rows are never mistaken for new results.
+
+Formula steps are graph.v2 and re-derive their inputs from durable state (the work
+bead's metadata, the lab-book/experiment beads, and the harvest files) — so a crashed
+tick is safe to drop; the next cron fire starts a clean tick. Read each step's
+description before acting; config vars override the defaults shown."""
+formula = "labtech-tick"
+version = 1
+contract = "graph.v2"
+
+[vars]
+[vars.labtech_home]
+description = "Abs path to the rig-local Lab Tech dir (runner scripts + experiments.toml + runtime runs/ & harvest/). Rig-owned."
+default = "/home/jjgarzella/Developer/ai/city/math-experiments/labtech"
+
+[vars.labtech_pack]
+description = "Abs path to the labtech pack root (for bin/ helper scripts). Pack-owned; step-9 wiring sets the composed path."
+default = "/home/jjgarzella/Developer/ai/city/math-city/packs/labtech"
+
+[vars.lab_book]
+description = "Bead id of the Lab-Tech-owned lab-book root for this rig (mx-7co.4). Experiment beads attach as its children."
+default = "mx-p03"
+
+[vars.concurrency]
+description = "Rig-global in-flight cap N (Q8). In-flight = open non-pinned experiment children of the lab-book. At cap, skip dispatch this tick."
+default = "1"
+
+[vars.experiment_bead_type]
+description = "Bead type for experiment beads. The as-built lab-book root is an epic+labels (no custom 'experiment' type is registered), so experiment beads are tasks tagged with the 'experiment' label; swap to 'experiment' here if/when that type is registered."
+default = "task"
+
+[vars.seed_N]
+description = "Seed value for the tunable N (deformations to sample) when the goal/lab-book give no ramp signal. Kept modest to bound CPU runtime at p=17."
+default = "200"
+
+[[steps]]
+id = "orient"
+title = "Validate identity, load config, pick the goal to serve, open a cycle"
+description = """
+**1. Fail fast on a missing identity / work bead.**
+```bash
+set -uo pipefail
+: "${GC_AGENT:?GC_AGENT empty — session harness did not inject identity; refuse to self-poll}"
+WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook / order); aborting}"
+```
+
+**1a. Orient.** Your standing brains prompt frames the data model, the read-only
+goal rule, the baseline caveat, and the N-ramp judgment. Skim it if anything
+below is unclear (it is also wired as your agent prompt once step 9 composes the
+pack): `{{labtech_pack}}/prompts/tick.template.md`.
+
+**2. Pin down config and the runtime state dir.** A statefile keyed by the work bead
+carries the few derived values across steps (durable + crash-visible).
+```bash
+LABTECH_HOME="{{labtech_home}}"
+LABTECH_PACK="{{labtech_pack}}"
+LAB_BOOK="{{lab_book}}"
+CAP="{{concurrency}}"
+CAT="$LABTECH_HOME/experiments.toml"
+export LABTECH_HOME            # dispatch/ping/harvest honor this for runs/ & harvest/
+mkdir -p "$LABTECH_HOME/state"
+STATE="$LABTECH_HOME/state/${WORK_BEAD}.env"
+: > "$STATE"
+save() { printf '%s=%q\n' "$1" "$2" >> "$STATE"; }   # append a value for later steps
+for k in LABTECH_HOME LABTECH_PACK LAB_BOOK CAP CAT WORK_BEAD; do save "$k" "${!k}"; done
+```
+Sanity-check the pieces exist before doing anything destructive:
+```bash
+for f in dispatch.sh ping.sh harvest.sh experiments.toml; do
+  [ -e "$LABTECH_HOME/$f" ] || { echo "MISSING $LABTECH_HOME/$f"; }
+done
+[ -x "$LABTECH_PACK/bin/resolve_command.py" ] || [ -f "$LABTECH_PACK/bin/resolve_command.py" ] \
+  || echo "MISSING resolver $LABTECH_PACK/bin/resolve_command.py"
+gc bd show "$LAB_BOOK" --json >/dev/null || echo "lab-book $LAB_BOOK not found"
+```
+
+**3. Check mail** (escalations / param overrides from the crew). Archive what you handle.
+```bash
+gc mail inbox 2>/dev/null | head -40 || true
+```
+
+**4. Pick the goal to serve.** Goals are READ-ONLY. The selection rule is: among OPEN
+goals, take the one whose results `table` is produced by some catalog experiment
+(match `goal.metadata.table == experiment.table`), preferring higher priority then
+older. With the v1 single goal this resolves to it deterministically.
+```bash
+mapfile -t CAT_TABLES < <(
+  for e in $(python3 "$LABTECH_PACK/bin/resolve_command.py" list --catalog "$CAT"); do
+    python3 "$LABTECH_PACK/bin/resolve_command.py" show --catalog "$CAT" --experiment "$e" --json \
+      | jq -r '.table'
+  done)
+GOALS=$(gc bd list --type=goal --status=open --json)
+# choose the first open goal whose table is in CAT_TABLES (priority then oldest)
+GOAL_ID=""; GOAL_TABLE=""
+while read -r gid gtable; do
+  for t in "${CAT_TABLES[@]}"; do
+    if [ "$gtable" = "$t" ]; then GOAL_ID="$gid"; GOAL_TABLE="$gtable"; break; fi
+  done
+  [ -n "$GOAL_ID" ] && break
+done < <(echo "$GOALS" | jq -r 'sort_by(.priority, .created_at) | .[] | "\\(.id) \\(.metadata.table // "")"')
+if [ -z "$GOAL_ID" ]; then
+  echo "No open goal matches a catalog table; nothing to serve this tick."
+  save GOAL_ID ""; exit 0   # benign: reap/harvest/diff still run; dispatch will be skipped
+fi
+```
+Read the goal's progress definition (filter + uniqueness key + group) straight from
+its metadata — these drive the diff, and keeping the goal authoritative means no
+progress rule is hard-coded in the pack:
+```bash
+GMETA=$(gc bd show "$GOAL_ID" --json | jq '.[0].metadata')
+GOAL_GROUP=$(gc bd show "$GOAL_ID" --json | jq -r '.[0].parent // ""')
+GOAL_FILTER=$(echo "$GMETA" | jq -c '.filter // {}')
+GOAL_KEY=$(echo "$GMETA" | jq -c '.uniqueness_key // ["slopes","slopelengths"]')
+[ -n "$GOAL_TABLE" ] && [ "$GOAL_TABLE" != "null" ] || GOAL_TABLE=$(echo "$GMETA" | jq -r '.table')
+for k in GOAL_ID GOAL_GROUP GOAL_TABLE GOAL_FILTER GOAL_KEY; do save "$k" "${!k}"; done
+echo "Serving goal $GOAL_ID (group $GOAL_GROUP) table=$GOAL_TABLE filter=$GOAL_FILTER key=$GOAL_KEY"
+```
+
+**5. Open a cycle label** (UTC timestamp; names this tick's harvest file) and stash it
+on the work bead too, so a restart can find the in-progress cycle.
+```bash
+CYCLE=$(date -u +%Y%m%dT%H%M%SZ)
+save CYCLE "$CYCLE"
+gc bd update "$WORK_BEAD" --set-metadata labtech_cycle="$CYCLE" --set-metadata labtech_goal="$GOAL_ID" || true
+```
+Close this step once the statefile holds LABTECH_HOME/PACK, LAB_BOOK, CAP, the goal
+selection, and CYCLE."""
+
+[[steps]]
+id = "reap"
+title = "Ping in-flight experiments; pin the ones that exited"
+needs = ["orient"]
+description = """
+Free the concurrency slot before deciding whether to dispatch: an experiment whose
+process has exited must be PINNED (not closed) so it stops counting as in-flight.
+
+```bash
+set -uo pipefail
+set -a; . "{{labtech_home}}/state/${GC_BEAD_ID}.env"; set +a
+export LABTECH_HOME
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+```
+
+In-flight = OPEN, non-pinned experiment children of the lab-book:
+```bash
+INFLIGHT_IDS=$(gc bd list --parent "$LAB_BOOK" --status open --no-pinned --json | jq -r '.[].id')
+```
+
+For each, ping by run_id (== bead id). `ping.sh` exits 0=alive, 1=exited (and removes
+the stale pidfile on first observed exit):
+```bash
+for id in $INFLIGHT_IDS; do
+  if bash "$LABTECH_HOME/ping.sh" "$id"; then
+    echo "[reap] $id still running"
+    gc bd update "$id" --append-notes "- $NOW ping: alive" || true
+  else
+    echo "[reap] $id exited -> pinning"
+    # PIN: native pinned column via raw SQL (this bd build has NO --pinned flag, mx-7co.5).
+    gc bd sql "UPDATE issues SET pinned=1 WHERE id='$id'" || echo "pin FAILED for $id"
+    gc bd update "$id" \
+      --set-metadata exited_at="$NOW" \
+      --append-notes "## Ping observations
+- $NOW ping: exited (pidfile reaped); pinned as a permanent record." || true
+  fi
+done
+```
+
+Record how many remain in-flight after reaping, for the dispatch step's cap check:
+```bash
+INFLIGHT_NOW=$(gc bd list --parent "$LAB_BOOK" --status open --no-pinned --json | jq 'length')
+printf 'INFLIGHT_NOW=%q\n' "$INFLIGHT_NOW" >> "{{labtech_home}}/state/${GC_BEAD_ID}.env"
+echo "[reap] in-flight after reap: $INFLIGHT_NOW (cap $CAP)"
+```
+Close this step when every in-flight experiment has been pinged and the exited ones pinned."""
+
+[[steps]]
+id = "harvest-diff"
+title = "Harvest the results table; diff vs the previous cycle and the baseline"
+needs = ["reap"]
+description = """
+Capture a full snapshot to disk (never into agent context) and compute the goal's
+progress metric against the previous cycle and the baseline.
+
+```bash
+set -uo pipefail
+set -a; . "{{labtech_home}}/state/${GC_BEAD_ID}.env"; set +a
+export LABTECH_HOME
+HARV_DIR="$LABTECH_HOME/harvest"
+```
+
+**1. Harvest** (networking lives inside harvest.sh; it sources the Supabase key):
+```bash
+if bash "$LABTECH_HOME/harvest.sh" "$CYCLE" "$GOAL_TABLE"; then
+  CUR="$HARV_DIR/$CYCLE.json"
+else
+  echo "[harvest] FAILED for table $GOAL_TABLE — skipping diff/dispatch this cycle."
+  gc bd update "$LAB_BOOK" --append-notes "## Cycle $CYCLE
+- Harvest of table $GOAL_TABLE FAILED; no diff this cycle (will retry next tick)." || true
+  printf 'HARVEST_OK=%q\n' "0" >> "$LABTECH_HOME/state/${GC_BEAD_ID}.env"
+  exit 0
+fi
+printf 'CUR=%q\nHARVEST_OK=%q\n' "$CUR" "1" >> "$LABTECH_HOME/state/${GC_BEAD_ID}.env"
+```
+
+**2. Locate the previous cycle and the baseline snapshots.** Baseline = the
+first-ever harvest (its rows are pre-existing — the baseline note); previous = the
+newest harvest strictly older than this one. On the very first tick both are absent,
+so this cycle ESTABLISHES the baseline (deltas are 0 by definition).
+```bash
+mapfile -t SNAPS < <(ls -1 "$HARV_DIR"/*.json 2>/dev/null | sort)
+BASELINE="${SNAPS[0]:-$CUR}"   # oldest snapshot ever; on the FIRST tick that IS this one
+PREV=""
+for ((i=${#SNAPS[@]}-1; i>=0; i--)); do
+  if [ "${SNAPS[$i]}" != "$CUR" ]; then PREV="${SNAPS[$i]}"; break; fi
+done
+```
+
+**3. Distinct-key counts** via the goal's filter + uniqueness key. Baseline = oldest
+snapshot, so on the first tick BASE_CT == NOW_CT and Δbaseline is 0 — pre-existing rows
+never read as progress. With no previous snapshot yet, Δprev is 0 too.
+```bash
+metric() { python3 "$LABTECH_PACK/bin/progress_metric.py" --harvest "$1" --filter "$GOAL_FILTER" --key "$GOAL_KEY"; }
+NOW_CT=$(metric "$CUR")
+BASE_CT=$(metric "$BASELINE")
+if [ -n "$PREV" ]; then PREV_CT=$(metric "$PREV"); else PREV_CT="$NOW_CT"; fi
+DELTA_PREV=$(( NOW_CT - PREV_CT ))
+DELTA_BASE=$(( NOW_CT - BASE_CT ))
+```
+
+**4. Which distinct keys are NEW since the previous cycle** (set difference of the
+dumped key tuples) — these are the freshly-discovered Newton polygons:
+```bash
+keys() { python3 "$LABTECH_PACK/bin/progress_metric.py" --harvest "$1" --filter "$GOAL_FILTER" --key "$GOAL_KEY" --dump-keys | sort -u; }
+NEW_KEYS=""
+if [ -n "$PREV" ]; then
+  NEW_KEYS=$(comm -23 <(keys "$CUR") <(keys "$PREV"))
+fi
+for k in NOW_CT PREV_CT BASE_CT DELTA_PREV DELTA_BASE; do printf '%s=%q\n' "$k" "${!k}" >> "$LABTECH_HOME/state/${GC_BEAD_ID}.env"; done
+# Stash the (possibly multi-line) new-key list in a sidecar file the lab-book step reads.
+printf '%s\n' "$NEW_KEYS" > "$LABTECH_HOME/state/${GC_BEAD_ID}.newkeys"
+echo "[diff] distinct now=$NOW_CT  Δprev=$DELTA_PREV  Δbaseline=$DELTA_BASE  (prev=$PREV_CT base=$BASE_CT)"
+```
+Close this step once the counts and the new-key list are computed and stashed."""
+
+[[steps]]
+id = "labbook"
+title = "Append this cycle's digest to the lab-book"
+needs = ["harvest-diff"]
+description = """
+Persist a SMALL digest to the lab-book bead (full snapshots stay on disk, Q2). This is
+the cross-cycle record the next tick — and the crew — reads.
+
+```bash
+set -uo pipefail
+set -a; . "{{labtech_home}}/state/${GC_BEAD_ID}.env"; set +a
+[ "${HARVEST_OK:-0}" = "1" ] || { echo "harvest failed this cycle; digest already noted in harvest-diff."; exit 0; }
+NEWKEYS=$(cat "$LABTECH_HOME/state/${GC_BEAD_ID}.newkeys" 2>/dev/null | sed '/^$/d')
+NEW_N=$(printf '%s\n' "$NEWKEYS" | sed '/^$/d' | wc -l | tr -d ' ')
+# Experiments that exited (got pinned) this run, for the audit line.
+EXITED=$(gc bd list --parent "$LAB_BOOK" --pinned --json \
+  | jq -r --arg c "$CYCLE" '[.[] | select(.metadata.exited_at != null)] | length')
+```
+
+**Compose and append the digest.** Keep it factual; the numbers are the spine. The
+`direction` of the metric is increasing, so Δ>0 = forward progress, Δ=0 = a barren cycle.
+```bash
+gc bd update "$LAB_BOOK" --append-notes "## Cycle $CYCLE — goal $GOAL_ID ($GOAL_TABLE)
+- Progress metric (distinct $GOAL_KEY where $GOAL_FILTER): **$NOW_CT** (Δ vs last cycle: $DELTA_PREV, Δ vs baseline: $DELTA_BASE)
+- New distinct keys this cycle: $NEW_N
+- In-flight after reap: ${INFLIGHT_NOW:-?} / cap $CAP; pinned (exited) experiments to date: $EXITED
+- Snapshot: harvest/$CYCLE.json"
+```
+
+**Judgment (optional but encouraged).** If you see a multi-cycle trend — a plateau (several
+Δprev=0 in a row), a fresh burst of polygons, or anything the crew should know — append a
+short `### Synthesis` / `### Recommendation` note to the lab-book as well (e.g. "3 barren
+cycles at p=17,N=$seed → recommend raising N" or "frontier still moving, hold params").
+Do NOT touch the goal or goal-group beads — they are read-only.
+
+Close this step when the cycle digest is on the lab-book."""
+
+[[steps]]
+id = "dispatch"
+title = "Dispatch one experiment under the cap (mint run_id, resolve, launch)"
+needs = ["labbook"]
+description = """
+Launch at most one new run, only if there is slack under the cap. The tick is the retry,
+so at-cap is a normal no-op, not an error.
+
+```bash
+set -uo pipefail
+set -a; . "{{labtech_home}}/state/${GC_BEAD_ID}.env"; set +a
+export LABTECH_HOME
+# Recompute in-flight live (don't trust the stashed value across a possible restart).
+INFLIGHT=$(gc bd list --parent "$LAB_BOOK" --status open --no-pinned --json | jq 'length')
+if [ -z "${GOAL_ID:-}" ]; then echo "No goal selected; nothing to dispatch."; exit 0; fi
+if [ "$INFLIGHT" -ge "$CAP" ]; then
+  echo "[dispatch] at cap ($INFLIGHT/$CAP) — skip dispatch this tick (the next tick retries)."
+  gc bd update "$LAB_BOOK" --append-notes "- Cycle $CYCLE: at cap ($INFLIGHT/$CAP), no dispatch." || true
+  exit 0
+fi
+```
+
+**1. Select the experiment** for this goal: the catalog entry whose `table` matches the
+goal's table (the same match the orient step used to pick the goal).
+```bash
+EXP_NAME=""
+for e in $(python3 "$LABTECH_PACK/bin/resolve_command.py" list --catalog "$CAT"); do
+  t=$(python3 "$LABTECH_PACK/bin/resolve_command.py" show --catalog "$CAT" --experiment "$e" --json | jq -r '.table')
+  if [ "$t" = "$GOAL_TABLE" ]; then EXP_NAME="$e"; break; fi
+done
+[ -n "$EXP_NAME" ] || { echo "No catalog experiment writes $GOAL_TABLE; escalate."; \
+  gc mail send mayor/ -s "Lab Tech: no experiment for goal $GOAL_ID table $GOAL_TABLE" \
+    -m "Tick $CYCLE found an open goal whose table no catalog experiment produces. Add a catalog entry."; exit 0; }
+```
+
+**2. Choose scientific parameters (JUDGMENT).** Pull `p` from the goal (its slice is
+pinned — e.g. p=17), and choose the tunable `N`. Policy you may apply or override:
+start at the catalog default; if the lab-book shows the metric plateauing (recent
+Δprev=0 cycles at this p), raise N to sample harder (e.g. double, up to a few×). The
+goal fixes p, so for THIS goal escalate via N, not p. Mind the box caveat (`-t auto`
+OOMs near p=23 on the 7.7 GB box; p=17 is fine at modest N).
+```bash
+GP=$(gc bd show "$GOAL_ID" --json | jq -r '.[0].metadata.p // empty')
+[ -n "$GP" ] || GP=$(echo "$GOAL_FILTER" | jq -r '.p // empty')
+: "${GP:?could not determine prime p for goal $GOAL_ID}"
+N_DEFAULT=$(python3 "$LABTECH_PACK/bin/resolve_command.py" show --catalog "$CAT" --experiment "$EXP_NAME" --json \
+  | jq -r '.parameters[] | select(.name=="N") | .default')
+NN="${N_DEFAULT:-{{seed_N}}}"      # <-- adjust here if a plateau warrants a bigger N
+echo "[dispatch] experiment=$EXP_NAME p=$GP N=$NN"
+```
+
+**3. Mint the experiment bead — its id IS the run_id (Q7).** Parent = lab-book; tag it.
+```bash
+TITLE="$EXP_NAME p=$GP N=$NN (cycle $CYCLE)"
+RUN_ID=$(gc bd create --silent \
+  --type "{{experiment_bead_type}}" \
+  --parent "$LAB_BOOK" \
+  -l "experiment,experiment:$EXP_NAME,labtech" \
+  --title "$TITLE")
+[ -n "$RUN_ID" ] || { echo "bd create returned no id; aborting dispatch."; exit 1; }
+echo "[dispatch] run_id=$RUN_ID"
+```
+
+**4. Resolve the catalog command for this run_id + params, then DISPATCH it detached.**
+```bash
+RESOLVED=$(python3 "$LABTECH_PACK/bin/resolve_command.py" render \
+  --catalog "$CAT" --experiment "$EXP_NAME" --run-id "$RUN_ID" -p "p=$GP" -p "N=$NN")
+echo "[dispatch] resolved: $RESOLVED"
+bash "$LABTECH_HOME/dispatch.sh" "$RUN_ID" "$RESOLVED"
+DISPATCHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+```
+
+**5. Record the full dispatch context on the experiment bead** (machine-truth in
+metadata; prose in the body). This is the audit trail; the bead stays OPEN (running)
+until a later tick's reap pings it exited and pins it.
+```bash
+PARAMS_JSON=$(jq -nc --arg p "$GP" --arg N "$NN" '{p:($p|tonumber), N:($N|tonumber)}')
+gc bd update "$RUN_ID" \
+  --set-metadata run_id="$RUN_ID" \
+  --set-metadata experiment_name="$EXP_NAME" \
+  --set-metadata params="$PARAMS_JSON" \
+  --set-metadata resolved_command="$RESOLVED" \
+  --set-metadata goal_id="$GOAL_ID" \
+  --set-metadata goal_group_id="$GOAL_GROUP" \
+  --set-metadata dispatched_at="$DISPATCHED_AT" \
+  --append-notes "## Dispatch context
+- Cycle: $CYCLE
+- Goal: $GOAL_ID (group $GOAL_GROUP), table $GOAL_TABLE
+- Resolved command: $RESOLVED
+- Dispatched at: $DISPATCHED_AT (pidfile runs/$RUN_ID.pid)
+
+## Ping observations
+(running — first ping is the next tick)
+
+## Notes
+"
+gc bd update "$LAB_BOOK" --append-notes "- Cycle $CYCLE: dispatched $RUN_ID ($EXP_NAME p=$GP N=$NN)." || true
+```
+Close this step once the run is launched and its bead records run_id/params/command,
+OR once you have logged an at-cap / no-experiment skip."""
+
+[[steps]]
+id = "finish"
+title = "Close the tick work bead and return"
+needs = ["dispatch"]
+description = """
+End the tick cleanly. The order/controller records the run for cooldown tracking; this
+wisp just closes its work bead, releases the runtime, and exits.
+
+```bash
+set -uo pipefail
+set -a; . "{{labtech_home}}/state/${GC_BEAD_ID}.env" 2>/dev/null; set +a
+SUMMARY="cycle ${CYCLE:-?}: metric ${NOW_CT:-?} (Δprev ${DELTA_PREV:-?}, Δbase ${DELTA_BASE:-?}), in-flight ${INFLIGHT:-?}/${CAP:-?}"
+# Tidy this run's statefile sidecars (harvest snapshots are kept; state is transient).
+rm -f "{{labtech_home}}/state/${GC_BEAD_ID}.env" "{{labtech_home}}/state/${GC_BEAD_ID}.newkeys" 2>/dev/null || true
+gc bd close "$WORK_BEAD" --reason "Lab Tech tick complete — $SUMMARY"
+gc runtime drain-ack
+exit
+```
+
+**Exit criteria:** in-flight experiments pinged and exited ones pinned; a harvest
+snapshot written; the cycle digest appended to the lab-book; at most one experiment
+dispatched (or a documented at-cap/no-goal skip); the work bead closed and the runtime
+drained."""
