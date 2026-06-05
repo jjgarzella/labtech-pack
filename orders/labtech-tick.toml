@@ -28,3 +28,9 @@
 description = "Lab Tech tick — one autonomous experiment-runner cycle (manual until step-9 cron wiring, mx-7co.6)"
 formula = "labtech-tick"
 trigger = "manual"
+# WHERE a fired tick routes (mx-7co.11): the math-experiments rig's ephemeral
+# polecat pool. Already rig-qualified (contains "/"), so qualifyPool returns it
+# verbatim; matches the work beads' gc.routed_to. Wiring the pool is independent
+# of flipping the trigger to cron (mx-7co.13) — even under trigger=manual a
+# `gc order run labtech-tick` now has a worker to dispatch the wisp to.
+pool = "math-experiments/gasvillage.polecat"
