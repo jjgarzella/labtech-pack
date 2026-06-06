@@ -259,7 +259,11 @@ first-ever harvest (its rows are pre-existing — the baseline note); previous =
 newest harvest strictly older than this one. On the very first tick both are absent,
 so this cycle ESTABLISHES the baseline (deltas are 0 by definition).
 ```bash
-mapfile -t SNAPS < <(ls -1 "$HARV_DIR"/*.json 2>/dev/null | sort)
+# Only timestamp-named snapshots count (CYCLE = date -u +%Y%m%dT%H%M%SZ). A stray
+# non-conforming file (e.g. a leftover smoke-*.json) sorts AFTER digits and would
+# otherwise be mis-picked as "newest", poisoning the diff baseline (mx-7co.16). The
+# format is fixed-width & zero-padded, so lexical sort == chronological order.
+mapfile -t SNAPS < <(ls -1 "$HARV_DIR"/*.json 2>/dev/null | grep -E '/[0-9]{8}T[0-9]{6}Z\.json$' | sort)
 BASELINE="${SNAPS[0]:-$CUR}"   # oldest snapshot ever; on the FIRST tick that IS this one
 PREV=""
 for ((i=${#SNAPS[@]}-1; i>=0; i--)); do
