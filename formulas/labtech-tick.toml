@@ -104,9 +104,10 @@ is also wired as your agent prompt: `{{labtech_pack}}/agents/tick/prompt.templat
 ```bash
 set -uo pipefail
 
-# ── Identity (fail fast: no identity => no tick, and nothing to close). ──
+# ── Identity. GC_AGENT is injected; GC_BEAD_ID is NOT injected in this city (the
+#    mx-7co.14/.15 boot-bare mode), so we CLAIM the routed work bead ourselves below
+#    via the ordinary routed/claim path — never a manual GC_BEAD_ID export. ──
 : "${GC_AGENT:?GC_AGENT empty — session harness did not inject identity; refuse to self-poll}"
-WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook / order); aborting}"
 
 # ── Config from the formula [vars]; ALL tick state lives in these shell vars. ──
 LABTECH_HOME="{{labtech_home}}"
@@ -116,11 +117,33 @@ CAP="{{concurrency}}"
 CAT="$LABTECH_HOME/experiments.toml"
 export LABTECH_HOME            # dispatch/ping/harvest honor this for runs/ & harvest/
 
-# ── The ONE clean way out: close the tick bead, drain the runtime, exit. The EXIT
-#    trap drains even on an unexpected abort, so the runtime is always released. ──
+# ── Pin gc to the math-experiments rig store. This tick agent's work_dir is a plain
+#    dir under math-city, where `gc bd list` resolves to the wrong (mc-) scope and
+#    silently returns no goals / no lab-book children; $LABTECH_HOME lives inside the
+#    rig checkout, so cd-ing there makes every `gc bd` query hit the mx- rig store. ──
+cd "$LABTECH_HOME" 2>/dev/null || cd "$(dirname "$LABTECH_HOME")" 2>/dev/null || true
+
+# ── Drain the runtime on ANY exit (defined before we may abort with no work). ──
 DRAIN_ACKED=0
 drain_once() { [ "$DRAIN_ACKED" = 1 ] || { gc runtime drain-ack || true; DRAIN_ACKED=1; }; }
 trap drain_once EXIT
+
+# ── Acquire the tick work bead = the formula's single STEP bead routed to me. With
+#    no GC_BEAD_ID injection, claim it via the routed/unassigned path (resume-safe:
+#    reuse an already in-progress claim first). The dedicated agent is max=1, but a
+#    routed claim is not exclusive, so VERIFY ownership after claiming (mx-7co.18). ──
+WORK_BEAD="${GC_BEAD_ID:-}"
+[ -n "$WORK_BEAD" ] || WORK_BEAD=$(gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress --include-ephemeral --json 2>/dev/null | jq -r '.[0].id // empty')
+if [ -z "$WORK_BEAD" ]; then
+  CAND=$(gc bd ready --include-ephemeral --metadata-field "gc.routed_to=$GC_AGENT" --unassigned --exclude-type=epic --json --sort oldest --limit=1 2>/dev/null | jq -r '.[0].id // empty')
+  if [ -n "$CAND" ]; then
+    gc bd update "$CAND" --claim >/dev/null 2>&1 || true
+    [ "$(gc bd show "$CAND" --json 2>/dev/null | jq -r '.[0].assignee // empty')" = "$GC_SESSION_NAME" ] && WORK_BEAD="$CAND"
+  fi
+fi
+: "${WORK_BEAD:?no tick work bead routed to $GC_AGENT could be claimed; nothing to do this tick}"
+
+# ── The ONE clean way out: close the tick step bead, drain the runtime, exit. ──
 finish() { gc bd close "$WORK_BEAD" --reason "Lab Tech tick complete — ${1:-(skipped)}" || true; drain_once; exit 0; }
 
 # ── Sanity-check the contract pieces exist (warn, don't die). ──
@@ -205,7 +228,7 @@ if [ "$HARVEST_OK" = 1 ]; then
   # non-conforming file (e.g. a leftover smoke-*.json) sorts AFTER digits and would
   # otherwise be mis-picked as "newest", poisoning the diff baseline (mx-7co.16). The
   # format is fixed-width & zero-padded, so lexical sort == chronological order.
-  mapfile -t SNAPS < <(ls -1 "$HARV_DIR"/*.json 2>/dev/null | grep -E '/[0-9]{8}T[0-9]{6}Z\.json$' | sort)
+  mapfile -t SNAPS < <(ls -1 "$HARV_DIR"/*.json 2>/dev/null | grep -E '/[0-9]{8}T[0-9]{6}Z\\.json$' | sort)
   BASELINE="${SNAPS[0]:-$CUR}"   # oldest snapshot ever; on the FIRST tick that IS this one
   PREV=""
   for ((i=${#SNAPS[@]}-1; i>=0; i--)); do
