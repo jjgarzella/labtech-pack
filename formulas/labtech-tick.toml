@@ -15,7 +15,7 @@ head, never in agent context.
 Lab Tech is *never told "done"*. It infers progress by diffing harvests across
 cycles and watching the goal's progress metric climb, then plateau (Q1).
 
-## The data model it operates (read the brains prompt too: {{labtech_pack}}/prompts/tick.template.md)
+## The data model it operates (read the brains prompt too: {{labtech_pack}}/agents/tick/prompt.template.md)
 
 - **lab-book** (`{{lab_book}}`): Lab-Tech-owned root, ONE per rig, outlives every
   goal-group. Experiment beads attach as its children. It holds the per-cycle
@@ -98,8 +98,8 @@ WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required (set by gc hook / order); aborting}
 
 **1a. Orient.** Your standing brains prompt frames the data model, the read-only
 goal rule, the baseline caveat, and the N-ramp judgment. Skim it if anything
-below is unclear (it is also wired as your agent prompt once step 9 composes the
-pack): `{{labtech_pack}}/prompts/tick.template.md`.
+below is unclear — it is also wired as your agent prompt (the pack composes it
+as the labtech.tick agent): `{{labtech_pack}}/agents/tick/prompt.template.md`.
 
 **2. Pin down config and the runtime state dir.** A statefile keyed by the work bead
 carries the few derived values across steps (durable + crash-visible).

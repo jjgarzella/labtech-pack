@@ -11,7 +11,9 @@
 #                                harvest-diff -> lab-book digest -> dispatch -> exit
 #   orders/labtech-tick.toml     the trigger that fires the formula (manual here;
 #                                step-9 / mx-7co.6 flips it to the 8-hourly cron)
-#   prompts/tick.template.md     the Lab Tech "brains" framing the formula reads
+#   agents/tick/agent.toml       the dedicated single-instance tick worker
+#                                (max_active_sessions=1; mx-7co.17 root fix)
+#   agents/tick/prompt.template.md  the Lab Tech "brains" — also the agent's prompt
 #   bin/resolve_command.py       render a catalog `command` template -> a concrete line
 #   bin/progress_metric.py       count distinct result-keys in a harvest snapshot
 #   reference/                   reference copies of the rig-local runner/harvest

@@ -1,0 +1,29 @@
+# labtech.tick — the dedicated single-instance worker that runs one Lab Tech tick.
+#
+# WHY THIS AGENT EXISTS (mx-7co.17, root fix for the mx-7co.14 over-spawn):
+# Before this, orders/labtech-tick.toml routed the tick's formula steps at the
+# generic `math-experiments/gasvillage.polecat` POOL (max 5). The pool over-poured
+# — multiple polecats raced the graph.v2 steps; surplus instances booted with an
+# empty GC_BEAD_ID and aborted orient (mx-7co.15). A POOL is the wrong shape for a
+# concurrency=1 sequential tick. This pack now ships its OWN agent, capped at a
+# single instance, and the order routes to it (pool = math-experiments/labtech.tick).
+# The import alias `labtech` namespaces this dir's name (`tick`) → addressable as
+# math-experiments/labtech.tick, mirroring how gasvillage.polecat is surfaced.
+#
+# WORK_DIR — simple dir, NOT a worktree (diverges from the polecat, on purpose):
+# every formula step reaches its tools by ABSOLUTE path — the rig-local runner
+# scripts via {{labtech_home}} (/.../math-experiments/labtech) and the helper
+# scripts via {{labtech_pack}} — and all bead/mail work goes through `gc` (the
+# controller/dolt, location-independent). No step does cwd-relative or git work in
+# the work_dir, so a rig checkout buys nothing here. A worktree would also need
+# packs/gasvillage's worktree-setup.sh, which is NOT in this pack ({{.ConfigDir}}
+# resolves to packs/labtech) — keeping a plain dir keeps the pack self-contained.
+# The city-scoped mayor uses the same simple-dir pattern.
+
+scope = "rig"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/{{.AgentBase}}"
+nudge = "Run gc hook to claim your routed tick step; the labtech-tick formula steps drive you orient->finish."
+idle_timeout = "1h"
+min_active_sessions = 0      # ephemeral: spawns on demand when the order routes a tick, exits after
+max_active_sessions = 1      # THE fix: hard-caps concurrency => one instance, no surplus, no race

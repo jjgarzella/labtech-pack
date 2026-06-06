@@ -35,10 +35,13 @@ packs/labtech/
 │   └── labtech-tick.toml      the trigger: action=labtech-tick formula.
 │                              v1 trigger=manual (the acceptance gate);
 │                              step 9 flips it to cron 0 */8 * * *.
-├── prompts/
-│   └── tick.template.md       Lab Tech's "brains" — the standing orientation the
-│                              formula reads (data model, read-only goal rule,
-│                              baseline caveat, the N-ramp + synthesis judgment).
+├── agents/
+│   └── tick/                  the dedicated single-instance tick worker (mx-7co.17).
+│       ├── agent.toml         max_active_sessions=1 → one instance per tick, no
+│       │                      pool over-spawn; the order routes here.
+│       └── prompt.template.md Lab Tech's "brains" / the agent's standing prompt
+│                              (data model, read-only goal rule, baseline caveat,
+│                              the N-ramp + synthesis judgment).
 ├── bin/
 │   ├── resolve_command.py     render a catalog `command` template + run_id +
 │                              chosen params → the exact line `dispatch` accepts.
@@ -55,7 +58,7 @@ packs/labtech/
 ## The pack/rig split (Q7/Q9)
 
 **The pack owns logic + templates and is networking-free** — it only renders
-text (`bin/`), encodes the cycle (`formulas/`, `prompts/`), and shells out to the
+text (`bin/`), encodes the cycle (`formulas/`, `agents/`), and shells out to the
 rig's contract scripts.
 
 **The rig owns the catalog + runner scripts + runtime state**, rig-local (the

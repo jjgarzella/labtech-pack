@@ -18,8 +18,8 @@
 #     adjustable cadence knob from the epic, Q10):
 #         trigger  = "cron"
 #         schedule = "0 */8 * * *"
-#   - set `pool`/target to the rig's tick worker (e.g. the math-experiments
-#     polecat pool the work beads route to: math-experiments/gasvillage.polecat),
+#   - set `pool`/target to the rig's tick worker (mx-7co.17: the pack's dedicated
+#     single-instance agent math-experiments/labtech.tick — see the pool line below),
 #     so the fired wisp runs with GC_BEAD_ID + GC_AGENT injected.
 # The formula carries its own knobs (concurrency cap N, seed_N, lab_book id,
 # paths) in [vars]; this file owns only WHEN the tick fires and WHERE it routes.
@@ -28,9 +28,13 @@
 description = "Lab Tech tick — one autonomous experiment-runner cycle (manual until step-9 cron wiring, mx-7co.6)"
 formula = "labtech-tick"
 trigger = "manual"
-# WHERE a fired tick routes (mx-7co.11): the math-experiments rig's ephemeral
-# polecat pool. Already rig-qualified (contains "/"), so qualifyPool returns it
-# verbatim; matches the work beads' gc.routed_to. Wiring the pool is independent
-# of flipping the trigger to cron (mx-7co.13) — even under trigger=manual a
-# `gc order run labtech-tick` now has a worker to dispatch the wisp to.
-pool = "math-experiments/gasvillage.polecat"
+# WHERE a fired tick routes (mx-7co.17): the pack's OWN dedicated single-instance
+# tick agent (agents/tick/, max_active_sessions=1), namespaced by the import alias
+# `labtech`. This was the gasvillage.polecat POOL (mx-7co.11), but a pool is the
+# wrong shape for a concurrency=1 sequential tick — it over-spawned, surplus
+# polecats raced the graph.v2 steps and booted with an empty GC_BEAD_ID
+# (mx-7co.14/.15). A single dedicated agent hard-caps that. Still rig-qualified
+# (contains "/"), so qualifyPool returns it verbatim; matches the work beads'
+# gc.routed_to. Independent of the cron flip (mx-7co.13) — even under
+# trigger=manual a `gc order run labtech-tick` has a worker to dispatch to.
+pool = "math-experiments/labtech.tick"
