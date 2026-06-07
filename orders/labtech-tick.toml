@@ -5,11 +5,12 @@
 # does exactly ONE tick and exits. All durable state lives in beads + harvest
 # files, so a dropped tick is safe — the next fire starts a clean cycle.
 #
-# TRIGGER = cron, every 30 minutes (mx-7co.13 go-live). `schedule = "*/30 * * * *"`
-# auto-fires the formula on the controller's scheduler; each fire pours one ephemeral
-# wisp that runs exactly ONE tick and exits. (v1 step 8 ran this as trigger=manual —
-# `gc order run labtech-tick` on demand, the mx-7co.5 acceptance gate; mx-7co.6 then
-# defined this autonomous-cron wiring.)
+# TRIGGER = manual (REVERTED from cron 2026-06-07, RAM EMERGENCY mc-wisp-nebkrm): swap
+# hit 100% and the ~2.6G julia spike risked OOM-killing dolt, so the */30 cron go-live
+# (mx-7co.13) was rolled back to manual to stop autonomous fires. `gc order run
+# labtech-tick` still runs one cycle on demand. RE-ENABLE the cron (trigger="cron",
+# schedule="*/30 * * * *") only after RAM/swap headroom is sorted. (v1 step 8 originally
+# shipped manual — the mx-7co.5 acceptance gate; mx-7co.6 defined the cron wiring.)
 #
 # CADENCE = 30 min by overseer decision (mc-wisp-y8tzl3), overriding the epic's
 # original 8-hourly default (Q10) — the box sustains fast N=1 cycles (mx-7co.10).
@@ -24,10 +25,9 @@
 # paths) in [vars]; this file owns only WHEN the tick fires and WHERE it routes.
 
 [order]
-description = "Lab Tech tick — one autonomous experiment-runner cycle (30-min cron, mx-7co.13 go-live)"
+description = "Lab Tech tick — one autonomous experiment-runner cycle (REVERTED to manual, RAM emergency mc-wisp-nebkrm)"
 formula = "labtech-tick"
-trigger = "cron"
-schedule = "*/30 * * * *"
+trigger = "manual"
 # WHERE a fired tick routes (mx-7co.17): the pack's OWN dedicated single-instance
 # tick agent (agents/tick/, max_active_sessions=1), namespaced by the import alias
 # `labtech`. This was the gasvillage.polecat POOL (mx-7co.11), but a pool is the
