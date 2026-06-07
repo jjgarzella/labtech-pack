@@ -5,29 +5,29 @@
 # does exactly ONE tick and exits. All durable state lives in beads + harvest
 # files, so a dropped tick is safe — the next fire starts a clean cycle.
 #
-# TRIGGER = manual (v1, step 8). `gc order run labtech-tick` instantiates the
-# formula on demand — this is the mx-7co.5 acceptance gate ("manual gc order run
-# executes one full cycle"). A manual trigger never auto-fires, so importing the
-# pack does not start a schedule on its own.
+# TRIGGER = cron, every 30 minutes (mx-7co.13 go-live). `schedule = "*/30 * * * *"`
+# auto-fires the formula on the controller's scheduler; each fire pours one ephemeral
+# wisp that runs exactly ONE tick and exits. (v1 step 8 ran this as trigger=manual —
+# `gc order run labtech-tick` on demand, the mx-7co.5 acceptance gate; mx-7co.6 then
+# defined this autonomous-cron wiring.)
 #
-# STEP 9 (mx-7co.6) flips this to the autonomous cron and wires the rig:
-#   - submodule packs/labtech behind a private remote; add
-#     [rigs.imports.labtech] source = "packs/labtech" to the math-experiments rig
-#     (without that import the rig can't see this order/formula yet);
-#   - change the two lines below to the 8-hourly schedule (the pack-level
-#     adjustable cadence knob from the epic, Q10):
-#         trigger  = "cron"
-#         schedule = "0 */8 * * *"
-#   - set `pool`/target to the rig's tick worker (mx-7co.17: the pack's dedicated
-#     single-instance agent math-experiments/labtech.tick — see the pool line below),
-#     so the fired wisp runs with GC_BEAD_ID + GC_AGENT injected.
+# CADENCE = 30 min by overseer decision (mc-wisp-y8tzl3), overriding the epic's
+# original 8-hourly default (Q10) — the box sustains fast N=1 cycles (mx-7co.10).
+# CONCURRENCY = 1, hard-capped by the routed worker agent itself
+# (agents/tick/agent.toml max_active_sessions=1), NOT by anything in this order.
+# NO RAM GUARD: per the overseer the tick must NOT watch free RAM or skip ticks on
+# memory pressure (the mayor watches RAM EXTERNALLY and pulls the cord if needed); the
+# tick stays guard-free. Routing: the rig's dedicated single-instance tick worker
+# math-experiments/labtech.tick (mx-7co.17 — see the pool line below), so the fired
+# wisp boots with GC_AGENT (GC_BEAD_ID is claimed by the formula itself, mx-7co.18).
 # The formula carries its own knobs (concurrency cap N, seed_N, lab_book id,
 # paths) in [vars]; this file owns only WHEN the tick fires and WHERE it routes.
 
 [order]
-description = "Lab Tech tick — one autonomous experiment-runner cycle (manual until step-9 cron wiring, mx-7co.6)"
+description = "Lab Tech tick — one autonomous experiment-runner cycle (30-min cron, mx-7co.13 go-live)"
 formula = "labtech-tick"
-trigger = "manual"
+trigger = "cron"
+schedule = "*/30 * * * *"
 # WHERE a fired tick routes (mx-7co.17): the pack's OWN dedicated single-instance
 # tick agent (agents/tick/, max_active_sessions=1), namespaced by the import alias
 # `labtech`. This was the gasvillage.polecat POOL (mx-7co.11), but a pool is the
