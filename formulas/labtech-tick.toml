@@ -57,11 +57,14 @@ subtracts the baseline so pre-existing rows are never mistaken for new results.
 This formula is ONE step (the default contract, like `mol-dog-stale-db`): the whole
 cycle runs in ONE shell execution, so every per-tick value lives in shell variables
 — there are NO cross-step `state/<root>.env` hops and NO control-dispatcher handoff.
-(graph.v2's per-step handoff never completes in this city: the control-dispatcher
-never materializes, so a multi-step tick would stall after step one. The tick is
-therefore intentionally single-session.) Durable state still lives only in beads and
-on disk, never in the wisp's head — so a crashed tick is safe to drop; the next fire
-starts a clean tick and re-derives everything from that durable state. Read the step
+(Why single-session rather than a multi-step graph.v2 tick: in the math-experiments
+rig, as of 2026-06, multi-step graph.v2 ticks were observed to stall after step one —
+the control-dispatcher that hands off between steps proved flaky/transient in this
+runtime. That is a rig/runtime observation here, NOT a universal property of graph.v2;
+the single-session shape simply sidesteps the cross-step dependency, which is reason
+enough on its own to keep it.) Durable state still lives only in beads and on disk,
+never in the wisp's head — so a crashed tick is safe to drop; the next fire starts a
+clean tick and re-derives everything from that durable state. Read the step
 description top-to-bottom before acting; config vars override the defaults shown."""
 formula = "labtech-tick"
 version = 1
@@ -104,9 +107,11 @@ is also wired as your agent prompt: `{{labtech_pack}}/agents/tick/prompt.templat
 ```bash
 set -uo pipefail
 
-# ── Identity. GC_AGENT is injected; GC_BEAD_ID is NOT injected in this city (the
-#    mx-7co.14/.15 boot-bare mode), so we CLAIM the routed work bead ourselves below
-#    via the ordinary routed/claim path — never a manual GC_BEAD_ID export. ──
+# ── Identity. GC_AGENT is injected. In this rig's runtime GC_BEAD_ID was observed
+#    NOT to be injected (boot-bare behavior, mx-7co.14/.15) — a runtime observation,
+#    not a guarantee — so rather than depend on it we CLAIM the routed work bead
+#    ourselves below via the ordinary routed/claim path (and still honor GC_BEAD_ID
+#    if it IS set); never a manual GC_BEAD_ID export. ──
 : "${GC_AGENT:?GC_AGENT empty — session harness did not inject identity; refuse to self-poll}"
 
 # ── Config from the formula [vars]; ALL tick state lives in these shell vars. ──
@@ -285,8 +290,10 @@ do_dispatch() {
       -m "Tick $CYCLE found an open goal whose table no catalog experiment produces. Add a catalog entry."; return 0; }
   # 2. Scientific parameters (JUDGMENT): the goal fixes p; N is the tunable. Start at
   #    the catalog default (N=1, mx-7co.10), falling back to seed_N only if empty.
-  #    Raise N here on a documented plateau, never p (the goal owns p; -t auto OOMs
-  #    near p=23 on the 7.7GB box — p=17 is safe at modest N).
+  #    Raise N here on a documented plateau, never p (the goal owns p). On the
+  #    math-experiments compute box (~7.7 GB as provisioned) -t auto runs were observed
+  #    (2026-06) to OOM near p=23 — a rig-specific observation, not a fixed limit;
+  #    p=17 is safe at modest N.
   GP=$(gc bd show "$GOAL_ID" --json | jq -r '.[0].metadata.p // empty')
   [ -n "$GP" ] || GP=$(echo "$GOAL_FILTER" | jq -r '.p // empty')
   [ -n "$GP" ] || { echo "could not determine prime p for goal $GOAL_ID; skipping dispatch."; return 1; }

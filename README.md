@@ -101,9 +101,11 @@ first tick both deltas are 0 by construction.
 
 ## Box caveat (mx-7co.2)
 
-The compute box is ~7.7 GB. Thread-greedy Julia (`-t auto`) **OOM-kills silently
-around p=23**. Keep launches thread-capped (e.g. `taskset -c 0-2`) and prefer
-raising `N` over `p`. The v1 goal fixes p=17, which is safe at modest `N`.
+The math-experiments compute box is ~7.7 GB (as provisioned). On it, as of 2026-06,
+thread-greedy Julia (`-t auto`) was observed to **OOM-kill silently around p=23** — a
+rig-specific observation, not a universal limit. Keep launches thread-capped (e.g.
+`taskset -c 0-2`) and prefer raising `N` over `p`. The v1 goal fixes p=17, which is
+safe at modest `N`.
 
 ## Running a tick
 
