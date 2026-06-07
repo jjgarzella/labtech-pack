@@ -90,9 +90,12 @@ construction.
 
 ## Box caveat (mx-7co.2) — protect the compute box
 
-The compute box is small (~7.7 GB). `-t auto` thread-greedy Julia runs
-**OOM-kill silently around p=23**. p=17 is fine at modest `N`. **Cap threads on
-any launch** — e.g. `taskset -c 0-2` — and prefer raising `N` over raising `p`.
+The math-experiments compute box is small (~7.7 GB as provisioned). On it, as of
+2026-06, `-t auto` thread-greedy Julia runs were observed to **OOM-kill silently
+around p=23**; p=17 is fine at modest `N`. Treat that p≈23 threshold as a
+rig-specific observation, not a fixed law — it depends on this box's RAM, the
+thread count, and the experiment. The durable rule holds regardless: **cap threads
+on any launch** — e.g. `taskset -c 0-2` — and prefer raising `N` over raising `p`.
 If a goal demands a larger `p`, flag it in the lab book and escalate to the
 mayor rather than risk silently OOMing the box.
 
