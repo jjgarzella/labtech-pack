@@ -24,10 +24,10 @@
 # paths) in [vars]; this file owns only WHEN the tick fires and WHERE it routes.
 
 [order]
-description = "Lab Tech tick — one autonomous experiment-runner cycle (30-min cooldown, mx-4kt durability fix)"
+description = "Lab Tech tick — one autonomous experiment-runner cycle (8-hour cooldown, mx-4kt durability fix)"
 formula = "labtech-tick"
 trigger = "cooldown"
-interval = "30m"
+interval = "8h"
 # WHERE a fired tick routes (mx-7co.17): the pack's OWN dedicated single-instance
 # tick agent (agents/tick/, max_active_sessions=1), namespaced by the import alias
 # `labtech`. This was the gasvillage.polecat POOL (mx-7co.11), but a pool is the
