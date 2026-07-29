@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# labtech/dispatch.sh — the pack `dispatch` contract (Lab Tech v1, mx-7co.2).
+# labtech/dispatch.sh — the pack `dispatch` contract.
 #
 # Lab Tech mints a run_id (the experiment bead id), resolves the catalog
 # `command` template into a concrete command line, then calls:
@@ -9,7 +9,7 @@
 # dispatch launches that ALREADY-RESOLVED command detached via `nohup`, records
 # a pidfile keyed by run_id, and exits. Exit 0 = launched. It does NOT wait for
 # the computation and it does NO networking — per design Q7, networking lives
-# inside the resolved command (the user's run_wrapper.sh, mx-7co.8), never in the
+# inside the resolved command (the rig's run_wrapper.sh), never in the
 # pack/runner. dispatch only needs the pid to be trackable, which run_wrapper.sh
 # guarantees by `exec`-ing all the way down to the Julia process.
 #
@@ -29,9 +29,9 @@
 # Usage:
 #   bash labtech/dispatch.sh <run_id> <command> [args…]
 #   bash labtech/dispatch.sh <run_id> "<command> [args…]"   # single-string form
-# Example (the v1 quintic-surface run):
-#   bash labtech/dispatch.sh mx-abc123 \
-#     bash /abs/labtech/run_wrapper.sh 4 5 7 100 mx-abc123
+# Example:
+#   bash labtech/dispatch.sh example-abc \
+#     bash /abs/labtech/run_wrapper.sh <arg…> example-abc
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

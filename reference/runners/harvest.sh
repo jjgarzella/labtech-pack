@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# labtech/harvest.sh — the pack `harvest` contract (Lab Tech v1, mx-7co.2).
+# labtech/harvest.sh — the pack `harvest` contract.
 #
 # Dumps the current results-DB state so Lab Tech can infer progress by diffing
 # harvests across cycles (it is never told "done"). v1 results DB == Supabase;
@@ -15,9 +15,9 @@
 #                                           #   (rig-local form; honors the path convention)
 #
 # Both produce the identical full snapshot; pick whichever the caller prefers.
-# Table defaults to the v1 quintic-surface target n4_d5_np; override with
-# LABTECH_TABLE or a 2nd positional arg (the table is judgment-based per Q7, named
-# in the goal/goal-group body).
+# The table has no default — set LABTECH_TABLE or pass it as the 2nd positional
+# arg. The tick formula always passes it explicitly, read off the goal (the table
+# is judgment-based per Q7, named in the goal/goal-group body).
 #
 # NETWORKING (Q7) lives HERE: harvest sources the Supabase key and talks to the
 # REST API itself. The pack stays networking-free.
@@ -32,7 +32,8 @@ HARVEST_DIR="${LABTECH_HOME}/harvest"
 ENV_FILE="${LABTECH_ENV_FILE:-${HOME}/.config/labtech/env}"
 
 cycle="${1:-}"
-table="${2:-${LABTECH_TABLE:-n4_d5_np}}"
+table="${2:-${LABTECH_TABLE:-}}"
+: "${table:?no table given — pass it as the 2nd arg or set LABTECH_TABLE (the goal names it)}"
 
 # --- secret loading (Q7), same idempotent pattern as run_wrapper.sh ---
 if [ -f "$ENV_FILE" ]; then

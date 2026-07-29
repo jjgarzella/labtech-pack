@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# labtech/ping.sh — the pack `ping` contract (Lab Tech v1, mx-7co.2).
+# labtech/ping.sh — the pack `ping` contract.
 #
 #   bash labtech/ping.sh <run_id>
 #

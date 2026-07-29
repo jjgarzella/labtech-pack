@@ -3,15 +3,17 @@
 Lab Tech is a Gas City **pack** that autonomously dispatches math experiments,
 tracks them across cycles, and synthesizes results — **without ever being told
 "done"**. It infers progress by diffing a results "DB" each cycle and watching a
-goal's progress metric climb, then plateau. It is project-agnostic and rides the
-**math-experiments** rig (it can serve any rig that imports it).
+goal's progress metric climb, then plateau. It is project-agnostic: it serves
+whichever rig imports it.
 
-This is the **v1** build (epic `mx-7co`). The design is twelve resolved
-decisions (Q1–Q12); the relevant ones are cited inline below and in each file.
+The design is twelve resolved decisions (Q1–Q12); the relevant ones are cited
+inline below and in each file. Where this pack came from, and what was actually
+measured on the rig it was built against, is in [HISTORY.md](HISTORY.md) — those
+are observations, not defaults.
 
 ## Mental model in one paragraph
 
-A cron (v1: manual) fires the `labtech-tick` **order**, which pours an ephemeral
+The `labtech-tick` **order** fires on a cadence and pours an ephemeral
 wisp that runs the `labtech-tick` **formula** for exactly **one tick** and exits.
 A tick: pick the goal to serve → ping in-flight runs and **pin** the ones that
 exited → **harvest** the results table to disk → **diff** it vs the previous
@@ -26,17 +28,18 @@ fire re-derives everything and starts clean.
 packs/labtech/
 ├── pack.toml                  pack manifest (schema 2)
 ├── README.md                  you are here
+├── HISTORY.md                 provenance + the observations behind the caveats
 ├── formulas/
-│   └── labtech-tick.toml      the one-tick cycle, graph.v2 (orient→reap→
-│                              harvest-diff→labbook→dispatch→finish). The knobs
-│                              (concurrency cap, paths, lab_book id, seed_N) are
-│                              its [vars].
+│   └── labtech-tick.toml      the one-tick cycle (orient→reap→harvest-diff→
+│                              labbook→dispatch→finish). The knobs (concurrency
+│                              cap, paths, lab_book id, seed_N) are its [vars];
+│                              labtech_home / labtech_pack / lab_book are REQUIRED.
 ├── orders/
-│   └── labtech-tick.toml      the trigger: action=labtech-tick formula.
-│                              v1 trigger=manual (the acceptance gate);
-│                              step 9 flips it to cron 0 */8 * * *.
+│   └── labtech-tick.toml      the trigger: action=labtech-tick formula,
+│                              cooldown 8h, routed rig-relative to labtech.tick.
+│                              Override cadence/target rig-locally.
 ├── agents/
-│   └── tick/                  the dedicated single-instance tick worker (mx-7co.17).
+│   └── tick/                  the dedicated single-instance tick worker.
 │       ├── agent.toml         max_active_sessions=1 → one instance per tick, no
 │       │                      pool over-spawn; the order routes here.
 │       └── prompt.template.md Lab Tech's "brains" / the agent's standing prompt
@@ -61,15 +64,15 @@ packs/labtech/
 text (`bin/`), encodes the cycle (`formulas/`, `agents/`), and shells out to the
 rig's contract scripts.
 
-**The rig owns the catalog + runner scripts + runtime state**, rig-local (the
-math-experiments rig keeps them in `labtech/`, pointed at by the formula's
-`labtech_home` var):
+**The rig owns the catalog + runner scripts + runtime state**, rig-local — keep
+them in a directory of the rig's choosing (e.g. `labtech/`) and point the
+formula's `labtech_home` var at it:
 
 | rig-local file | role |
 |----------------|------|
-| `experiments.toml` | the **menu** of runnable experiments (Q4/Q5 OPTION A) — NOT a run log. Each `[[experiment]]`: `command` template, `[experiment.constants]`, tunable `[[parameter]]` blocks, `table`. (mx-7co.3) |
-| `dispatch.sh` `ping.sh` `harvest.sh` | the exec **contract** (mx-7co.2). **Networking lives here**, never in the pack. |
-| `run_wrapper.sh` `run_experiment.{sh,jl}` | the experiment **engine + networking wrapper** (mx-7co.1/8) — the catalog `command` points at them. |
+| `experiments.toml` | the **menu** of runnable experiments (Q4/Q5 OPTION A) — NOT a run log. Each `[[experiment]]`: `command` template, `[experiment.constants]`, tunable `[[parameter]]` blocks, `table`. |
+| `dispatch.sh` `ping.sh` `harvest.sh` | the exec **contract**. **Networking lives here**, never in the pack. |
+| `run_wrapper.sh` `run_experiment.{sh,jl}` | the experiment **engine + networking wrapper** — the catalog `command` points at them. |
 | `runs/` `harvest/` `state/` | runtime state (gitignored). |
 
 The contract scripts under `reference/runners/` are verbatim copies so a new rig
@@ -78,72 +81,80 @@ has a working starting point and the contract is documented in code. They are
 
 ## The data model (Q3/Q6)
 
-- **lab-book** (`mx-p03`) — Lab-Tech-owned root, **one per rig**, outlives every
-  goal-group. Experiment beads attach as children. Holds the per-cycle harvest
-  digests + cross-cycle synthesis.
+- **lab-book** (formula var `lab_book`) — Lab-Tech-owned root, **one per rig**,
+  outlives every goal-group. Experiment beads attach as children. Holds the
+  per-cycle harvest digests + cross-cycle synthesis.
 - **experiment** bead — one per run; **`run_id == bead id`** (Q7). Parent =
   lab-book; links to its goal via `goal_id`/`goal_group_id` metadata. **Lifecycle
-  = PINNED, not closed**: running = `open`; exited = `pinned=1`
-  (`gc bd sql "UPDATE issues SET pinned=1 WHERE id='<exp>'"` — this bd build has
-  **no `--pinned` flag**, mx-7co.5). In-flight = open, non-pinned experiment
-  children of the lab-book.
+  = PINNED, not closed**: running = `open`; exited = `pinned=1`. The reap step
+  sets that itself — it prefers a native pin flag where the `bd` build offers one,
+  and otherwise writes `pinned=1` via `gc bd sql`. In-flight = open, non-pinned
+  experiment children of the lab-book.
 - **goal-group / goal** — crew-authored, **READ-ONLY to Lab Tech**. The goal's
   metadata names the `table`, `filter`, and `uniqueness_key` that define
-  progress; the pack hard-codes no progress rule. v1 goal: `mx-9w6.1` — distinct
-  Newton polygons at p=17 in `n4_d5_np`.
+  progress; the pack hard-codes no progress rule. A goal that names no
+  `uniqueness_key` gets harvested but not scored.
 
-## Baseline caveat (mx-7co.5)
+## Baseline caveat
 
-`n4_d5_np` is **non-empty at v1 start**. The first tick's harvest is the
-**baseline**; only distinct keys appearing after it count as progress. The diff
-subtracts the baseline so pre-existing rows never read as new results — on the
-first tick both deltas are 0 by construction.
+A rig's results table is normally **already non-empty** when Lab Tech starts on
+it. The first tick's harvest is the **baseline**; only distinct keys appearing
+after it count as progress. The diff subtracts the baseline so pre-existing rows
+never read as new results — on the first tick both deltas are 0 by construction.
 
-## Box caveat (mx-7co.2)
+## Box caveat
 
-The math-experiments compute box is ~7.7 GB (as provisioned). On it, as of 2026-06,
-thread-greedy Julia (`-t auto`) was observed to **OOM-kill silently around p=23** — a
-rig-specific observation, not a universal limit. Keep launches thread-capped (e.g.
-`taskset -c 0-2`) and prefer raising `N` over `p`. The v1 goal fixes p=17, which is
-safe at modest `N`.
+Compute cost grows much faster in `p` than in `N`, and a thread-greedy run can
+**OOM-kill the compute box silently** — nothing reports the kill. Where that
+ceiling sits is a property of the rig's box and experiment, so record your own
+measured limits in the rig's Lab Tech docs; this pack names no threshold. Two
+rules hold anywhere: keep launches thread-capped (e.g. `taskset -c 0-2`) and
+prefer raising `N` over `p`.
+
+## Wiring a rig
+
+1. give this pack a git remote and add it to the city (a submodule under
+   `packs/labtech` works well; commit `.gitmodules`, init/update on clones);
+2. import it into the rig in `city.toml`, and supply the three REQUIRED formula
+   vars — the pack ships no defaults for them on purpose:
+
+   ```toml
+   [[rigs]]
+   name = "<rig>"
+   [rigs.imports.labtech]
+   source = "packs/labtech"
+   [rigs.formula_vars]
+   labtech_home = "/abs/path/to/<rig>/labtech"   # runner scripts + experiments.toml
+   labtech_pack = "/abs/path/to/<city>/packs/labtech"
+   lab_book     = "<lab-book-bead-id>"           # create this bead first
+   ```
+
+3. copy `reference/runners/` into `<labtech_home>` and adapt the networking bits
+   to your results DB and compute box;
+4. tune `orders/labtech-tick.toml`'s cadence rig-locally if 8h does not suit;
+5. confirm a real tick fires end-to-end.
 
 ## Running a tick
-
-v1 is **manual** (the mx-7co.5 acceptance gate):
 
 ```bash
 gc order run labtech-tick        # one full cycle end-to-end, then exit
 ```
 
-This requires the pack to be composed into the rig (step 9's
-`[rigs.imports.labtech]`) and live infra (Supabase results DB + the CPU box
-reachable from the runner scripts). Until that import lands, validate the pieces
+This needs the import above plus live infra (the results DB and a compute box
+reachable from the runner scripts). Before that lands, validate the pieces
 directly:
 
 ```bash
 # formula compiles + the helpers resolve against the live catalog
 gc formula show labtech-tick
-python3 bin/resolve_command.py render --catalog <rig>/labtech/experiments.toml \
-    --experiment fermat-deformations-quintic --run-id mx-TEST -p p=17 -p N=200
-python3 bin/progress_metric.py --harvest <some>.json \
-    --filter '{"p":17}' --key '["slopes","slopelengths"]'
+python3 bin/resolve_command.py render --catalog <labtech_home>/experiments.toml \
+    --experiment <experiment-name> --run-id example-abc -p p=<prime> -p N=<count>
+python3 bin/progress_metric.py --harvest <snapshot>.json \
+    --filter '{"<col>":<value>}' --key '["<col1>","<col2>"]'
 ```
 
-## Acceptance gate (mx-7co.5)
+## Acceptance gate
 
 > `gc order run` (manual) executes one full cycle end-to-end: dispatches under
 > the cap, records the experiment bead, harvests, writes a lab-book digest, pins
-> on exit. Respects N=1.
-
-## Wiring seam → step 9 (mx-7co.6)
-
-This pack is self-contained but **not yet wired**. Step 9 owns:
-
-1. give `packs/labtech` a **private GH remote** and add it to math-city as a git
-   **submodule** at `packs/labtech` (commit `.gitmodules`; init/update on clones);
-2. add `[rigs.imports.labtech] source = "packs/labtech"` to the math-experiments
-   rig so the rig sees this formula + order;
-3. flip `orders/labtech-tick.toml` to `trigger = "cron"`, `schedule =
-   "0 */8 * * *"` (the pack-level adjustable cadence, Q10) and set its
-   `pool`/target to the rig's tick worker;
-4. confirm a real scheduled tick fires end-to-end on cron.
+> on exit. Respects the catalog's N default.
