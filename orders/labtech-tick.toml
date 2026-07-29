@@ -1,40 +1,38 @@
-# labtech-tick — the trigger that fires one Lab Tech cycle (Lab Tech v1, mx-7co.5).
+# labtech-tick — the trigger that fires one Lab Tech cycle.
 #
 # An order pairs a TRIGGER with an ACTION. The action is the `labtech-tick`
 # formula (formulas/labtech-tick.toml); each fire pours an ephemeral wisp that
 # does exactly ONE tick and exits. All durable state lives in beads + harvest
 # files, so a dropped tick is safe — the next fire starts a clean cycle.
 #
-# TRIGGER = cron, every 30 minutes (mx-7co.13 go-live). `schedule = "*/30 * * * *"`
-# auto-fires the formula on the controller's scheduler; each fire pours one ephemeral
-# wisp that runs exactly ONE tick and exits. (v1 step 8 ran this as trigger=manual —
-# `gc order run labtech-tick` on demand, the mx-7co.5 acceptance gate; mx-7co.6 then
-# defined this autonomous-cron wiring.)
+# TRIGGER = cooldown, 8h. A cooldown measures from the END of the last run, so a
+# long experiment never stacks ticks on top of itself. `trigger = "cron"` with a
+# `schedule` is the alternative when you want wall-clock ticks instead.
 #
-# CADENCE = 30 min by overseer decision (mc-wisp-y8tzl3), overriding the epic's
-# original 8-hourly default (Q10) — the box sustains fast N=1 cycles (mx-7co.10).
-# CONCURRENCY = 1, hard-capped by the routed worker agent itself
-# (agents/tick/agent.toml max_active_sessions=1), NOT by anything in this order.
-# NO RAM GUARD: per the overseer the tick must NOT watch free RAM or skip ticks on
-# memory pressure (the mayor watches RAM EXTERNALLY and pulls the cord if needed); the
-# tick stays guard-free. Routing: the rig's dedicated single-instance tick worker
-# math-experiments/labtech.tick (mx-7co.17 — see the pool line below), so the fired
-# wisp boots with GC_AGENT (GC_BEAD_ID is claimed by the formula itself, mx-7co.18).
-# The formula carries its own knobs (concurrency cap N, seed_N, lab_book id,
-# paths) in [vars]; this file owns only WHEN the tick fires and WHERE it routes.
+# CADENCE is the main thing an importing rig will want to change, and it is a
+# judgment call about that rig's box and experiment length: fast cycles keep the
+# frontier moving but cost tokens and can outrun a slow experiment. 8h is a
+# deliberately conservative default. NO RAM GUARD: the tick does not watch free
+# memory or skip ticks under pressure — bounding concurrency is the agent's job
+# (agents/tick/agent.toml `max_active_sessions = 1`), and watching the box is the
+# operator's. Do not add a memory guard here.
+#
+# ROUTING — `pool` is deliberately UNQUALIFIED (no "/"). gc qualifies a bare pool
+# name against the order's own rig at dispatch, so `labtech.tick` resolves to
+# `<importing-rig>/labtech.tick` — this pack's own dedicated single-instance tick
+# agent (agents/tick/), namespaced by the `labtech` import alias. That keeps the
+# pack portable: no rig name is baked in, and every importing rig gets its own
+# worker. A dedicated max=1 agent — not a shared polecat POOL — is the right shape
+# for a concurrency=1 sequential tick; a pool over-pours, and surplus wisps race
+# each other for the same tick bead.
+#
+# TO OVERRIDE per rig: ship a rig-local order of the same name with your own
+# `interval`/`schedule` (and `pool`, if you route ticks somewhere other than this
+# pack's agent). Rig-local orders take precedence over the pack's.
 
 [order]
-description = "Lab Tech tick — one autonomous experiment-runner cycle (8-hour cooldown, mx-4kt durability fix)"
+description = "Lab Tech tick — one autonomous experiment-runner cycle (8-hour cooldown)"
 formula = "labtech-tick"
 trigger = "cooldown"
 interval = "8h"
-# WHERE a fired tick routes (mx-7co.17): the pack's OWN dedicated single-instance
-# tick agent (agents/tick/, max_active_sessions=1), namespaced by the import alias
-# `labtech`. This was the gasvillage.polecat POOL (mx-7co.11), but a pool is the
-# wrong shape for a concurrency=1 sequential tick — it over-spawned, surplus
-# polecats raced the graph.v2 steps and booted with an empty GC_BEAD_ID
-# (mx-7co.14/.15). A single dedicated agent hard-caps that. Still rig-qualified
-# (contains "/"), so qualifyPool returns it verbatim; matches the work beads'
-# gc.routed_to. Independent of the cron flip (mx-7co.13) — even under
-# trigger=manual a `gc order run labtech-tick` has a worker to dispatch to.
-pool = "math-experiments/labtech.tick"
+pool = "labtech.tick"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """resolve_command.py — render a Lab Tech catalog `command` into a concrete line.
 
-This is the pack-owned RESOLUTION step (Q4/Q5 OPTION A, mx-7co.5). The catalog
-(`experiments.toml`, rig-local, mx-7co.3) is the MENU of runnable experiments; each
+This is the pack-owned RESOLUTION step (Q4/Q5 OPTION A). The catalog
+(`experiments.toml`, rig-local) is the MENU of runnable experiments; each
 `[[experiment]]` carries a Go-text/template `command` with `{{.param}}` / `{{.run_id}}`
 holes plus `[experiment.constants]` and tunable `[[experiment.parameter]]` blocks.
 
@@ -14,7 +14,7 @@ template data map by MERGING, in order:
     run_id                   -> run_id
 
 renders the `command` against that map, and prints the resolved string. The tick
-formula hands that string straight to `dispatch` (mx-7co.2). Keeping this in one small,
+formula hands that string straight to `dispatch`. Keeping this in one small,
 testable tool — instead of the wisp eyeballing the template — makes `gc order run`
 deterministic and removes a class of mis-substitution error.
 
