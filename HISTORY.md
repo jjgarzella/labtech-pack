@@ -85,3 +85,14 @@ because p≈23 is a fact about 7.7 GB of RAM and this experiment's memory profil
 `reference/runners/{dispatch,ping,harvest}.sh` were captured verbatim from the
 `math-experiments` rig's as-built scripts (`mx-7co.2`). They are a starting
 point, not what runs — see `reference/README.md`.
+
+
+## 2026-10-24: persistent George
+
+At the overseer's request, Lab Tech now supplies an always-on Codex
+`gpt-6.1-sol` agent named George, in honor of George E. P. Box. The prompt
+explicitly separates the software agent from its namesake. The old tick worker
+and cycle formula are retained for explicit compatibility use; their automatic
+order was moved to `reference/orders/` so enabling George does not dispatch
+historical experiments. Existing lab books, experiment records and artifacts
+are retained. Current explicit scope and holds govern all new work.

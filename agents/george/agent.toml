@@ -1,0 +1,12 @@
+# George is one persistent named session per importing rig. The named-session
+# declaration in pack.toml supplies always-on lifecycle; do not also warm a pool.
+scope = "rig"
+provider = "codex"
+wake_mode = "resume"
+work_dir = ".gc/agents/{{.Rig}}/{{.AgentBase}}"
+max_active_sessions = 1
+nudge = "Check your hook and mail, recover your lab book, then act on current authorized lab work."
+
+[option_defaults]
+model = "gpt-6.1-sol"
+effort = "high"

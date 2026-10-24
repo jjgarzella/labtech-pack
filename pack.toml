@@ -1,46 +1,10 @@
-# labtech — the Lab Tech autonomous experiment-runner pack (Gas City).
-#
-# Lab Tech dispatches math experiments, tracks them across cycles, and
-# synthesizes results — without ever being told "done". It infers progress by
-# diffing a results "DB" (harvest) across cycles and watching a goal's progress
-# metric climb, then plateau. It is project-agnostic (Q9): it serves whichever
-# rig imports it.
-#
-# ## What this pack OWNS (logic + templates)
-#   formulas/labtech-tick.toml   the one-tick cycle: orient -> reap ->
-#                                harvest-diff -> lab-book digest -> dispatch -> exit
-#   orders/labtech-tick.toml     the trigger that fires the formula (8h cooldown;
-#                                override the cadence rig-locally)
-#   agents/tick/agent.toml       the dedicated single-instance tick worker
-#                                (max_active_sessions=1)
-#   agents/tick/prompt.template.md  the Lab Tech "brains" — also the agent's prompt
-#   bin/resolve_command.py       render a catalog `command` template -> a concrete line
-#   bin/progress_metric.py       count distinct result-keys in a harvest snapshot
-#   reference/                   reference copies of the rig-local runner/harvest
-#                                contract scripts (a starting point for new rigs)
-#   HISTORY.md                   provenance + the observations behind the caveats
-#
-# ## What the RIG owns (catalog + runners + runtime state), e.g. labtech/ :
-#   experiments.toml             the menu of runnable experiments (Q4/Q5 OPTION A)
-#   dispatch.sh / ping.sh / harvest.sh   the exec contract; networking lives HERE,
-#                                never in the pack (Q7)
-#   run_wrapper.sh / run_experiment.*    the experiment engine + networking wrapper
-#   runs/ harvest/ state/        runtime state (gitignored)
-#
-# The pack stays networking-free: it only renders text and shells out to the
-# rig-local contract scripts. See README.md ("Wiring a rig") for the full picture.
-#
-# Import into a rig via city.toml — note the three REQUIRED formula vars, which
-# the pack deliberately ships without defaults:
-#   [[rigs]]
-#   name = "<rig>"
-#   [rigs.imports.labtech]
-#   source = "packs/labtech"
-#   [rigs.formula_vars]
-#   labtech_home = "/abs/path/to/<rig>/labtech"
-#   labtech_pack = "/abs/path/to/<city>/packs/labtech"
-#   lab_book     = "<lab-book-bead-id>"
-
+# George is the persistent lab technician. Experiment catalogs, runner scripts,
+# lab books, and runtime artifacts remain owned by the importing rig.
 [pack]
 name = "labtech"
 schema = 2
+
+[[named_session]]
+template = "george"
+scope = "rig"
+mode = "always"
