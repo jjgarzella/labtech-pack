@@ -1,0 +1,55 @@
+formula = "labtech-queue"
+version = 2
+description = """
+George: reconcile durable attempts, review explicit queued requests, launch at most one authorized experiment, remain available.
+
+This step belongs to the persistent George session, alongside his other assigned
+work. Verify this formula bead is routed to you and claim it through the supported
+bead interface. Never replace another current assignment or drain/reset yourself.
+
+1. Read `{{labtech_pack}}/docs/serial-queue.md`, current mail/hook, this assignment,
+   and the durable queue checkpoint. Validate required paths and queue config.
+2. Run `python3 {{labtech_pack}}/bin/serial_queue.py --home {{labtech_home}} reconcile`.
+   This command NEVER starts experiments. Compare active process identity, durable
+   exit receipt, raw logs, results/artifact paths, and measurement evidence. Quiet
+   logs do not establish a failure. Missing/foreign/ambiguous evidence parks the
+   serial slot for coordinator review, without killing or rerunning anything.
+3. Review each newly submitted pending_review request against its original scope,
+   authorization bead and dependencies. Read scope_beads including source task and
+   original pause records. New queue entries cannot resume historical held work.
+   Check exact argv, clean owned source revision, runtime version/project/source,
+   input hashes, scientific parameters, output/measurement plan and foreground
+   execution contract. Do not approve detached remote/untracked descendants or
+   unreviewed parameters. Pending or held submissions cannot execute.
+   Only when already authorized: use `approve --request ID --authorization-id ID
+   --authorization-rig RIG`. Approval records the exact spec digest in beads.
+4. Run `python3 {{labtech_pack}}/bin/serial_queue.py --home {{labtech_home}} run-next`.
+   It starts at most ONE approved request under both an inherited process lock and
+   a durable active reservation. Attempt/ownership records precede launch. Exit
+   receipts precede completion notifications. Failed attempts stay retained;
+   retries require explicit fresh review and `retry`, never automatic requeue.
+5. For finished attempts, verify outcome.json and raw artifacts. An exit-zero
+   receipt is process completion, not a scientific success claim. Record missing
+   measurement evidence and retain the request for follow-up review. Update the
+   request bead with receipt/artifact paths, measured outcome, and disposition;
+   append a concise digest to `{{lab_book}}` with request/run/attempt IDs and ledger
+   path. Never replace the ledger with prose or conversation.
+6. Close only this short formula work bead after checkpointing what ran/was held
+   and the next action. Stay available for conversation, other persistent duties,
+   new-request nudges and completion nudges. Do not wait synchronously for the
+   experiment, busy poll, drain, or close the lab book/workflow roots.
+
+Historical `labtech-tick` is reference-only for this workflow. It selects goals
+and may dispatch experiments; never run it as a queue or reconciliation shortcut.
+This formula neither resumes old paused goals nor authorizes FunSearch.
+"""
+
+[vars.labtech_home]
+description = "Required rig-local runner and queue directory"
+default = ""
+[vars.labtech_pack]
+description = "Required installed labtech pack directory"
+default = ""
+[vars.lab_book]
+description = "Required existing lab-book bead; narrative summaries only"
+default = ""

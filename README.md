@@ -30,11 +30,24 @@ him. Importing rigs may override provider/model settings through normal agent
 patches. The required paths and lab-book ID are rig-specific; the pack invents
 none of them.
 
+## Serial experiment queue
+
+Use the [serial queue workflow](docs/serial-queue.md): `labtech-queue` is George's
+formula for explicit authorized submissions. Durable request/run/attempt records
+and an inherited process lock enforce one experiment across conversation restarts.
+The new eight-hour `labtech-reconcile` order observes/checkpoints only. Submission
+and completion nudges prompt queue service between ticks. Existing persistent
+conversation and other assignments continue; no extra worker or drain is needed.
+
+The legacy tick remains reference-only and must not be enabled as a replacement.
+New requests do not resume historical held goals or authorize FunSearch.
+
 ## Responsibilities and durable state
 
 - Preserve the current assignment, scientific parameters, source/runtime pins,
   experiment ownership, and explicit pauses.
-- Recover active runs from their recorded IDs, pidfiles, and result evidence.
+- Recover active runs from their recorded IDs, machine/boot/process identity,
+  durable exit receipts, and result evidence.
   An exited process does not establish success.
 - Keep narrative digests and recommendations in the lab book. Keep raw logs,
   harvest snapshots, and large tables on disk.
@@ -56,19 +69,10 @@ See [reference runners](reference/README.md) for the execution contract.
 
 ## Migration from ephemeral ticks
 
-The old `agents/tick/` and `formulas/labtech-tick.toml` remain available for
-explicit compatibility use. They run one cycle and drain their own ephemeral
-worker; George must not use that behavior for his persistent session. The
-legacy formula also assumes older bead interfaces (including a `goal` issue
-type); verify those interfaces before reusing it. It is not the new agent's
-default execution path.
-
-The former automatic eight-hour order is preserved at
-`reference/orders/labtech-tick.toml`, outside the pack's active `orders/`
-directory. It no longer starts historical experiments just because the new
-persistent agent is enabled. A rig can deliberately install an order after
-its current experiment scope and runner compatibility are established; avoid
-running two dispatchers for the same lab book.
+The old autonomous tick agent, formula and order are retained under `reference/`.
+They are not discovered as active agents/formulas/orders. Their contracts assume
+older bead interfaces and dispatch historical goals; porting them is outside this
+queue workflow. Never install them as the reconciliation path.
 
 Existing lab books, run IDs, experiment beads, files, and source history are
 preserved. No old goal is resumed by this migration. Historical observations
