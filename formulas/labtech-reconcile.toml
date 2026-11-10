@@ -1,18 +1,8 @@
 formula = "labtech-reconcile"
-version = 1
-description = "George's eight-hour observation/checkpoint only; never launch, approve, or retry experiments."
-
-[vars.labtech_home]
-default = ""
-[vars.labtech_pack]
-default = ""
-[vars.lab_book]
-default = ""
-
-[[steps]]
-id = "reconcile"
-title = "Recover missed completions and checkpoint the serial queue"
+version = 2
 description = """
+George's eight-hour observation/checkpoint only; never launch, approve, or retry experiments.
+
 Claim this routed formula bead as persistent George without disturbing other work.
 Run `python3 {{labtech_pack}}/bin/serial_queue.py --home {{labtech_home}} reconcile`.
 Read `{{labtech_pack}}/docs/serial-queue.md`. Inspect the active identity/receipt and
@@ -29,3 +19,11 @@ cycle. Missing exit receipts or identity mismatch require coordinator review and
 retain the active slot. Close only this formula work bead; remain available and
 never drain/reset the persistent session.
 """
+
+[vars.labtech_home]
+default = ""
+[vars.labtech_pack]
+default = ""
+[vars.lab_book]
+default = ""
+

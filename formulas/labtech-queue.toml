@@ -1,21 +1,8 @@
 formula = "labtech-queue"
-version = 1
-description = "George: reconcile durable attempts, review explicit queued requests, launch at most one authorized experiment, remain available."
-
-[vars.labtech_home]
-description = "Required rig-local runner and queue directory"
-default = ""
-[vars.labtech_pack]
-description = "Required installed labtech pack directory"
-default = ""
-[vars.lab_book]
-description = "Required existing lab-book bead; narrative summaries only"
-default = ""
-
-[[steps]]
-id = "queue"
-title = "Reconcile and serve the serial experiment queue"
+version = 2
 description = """
+George: reconcile durable attempts, review explicit queued requests, launch at most one authorized experiment, remain available.
+
 This step belongs to the persistent George session, alongside his other assigned
 work. Verify this formula bead is routed to you and claim it through the supported
 bead interface. Never replace another current assignment or drain/reset yourself.
@@ -56,3 +43,14 @@ Historical `labtech-tick` is reference-only for this workflow. It selects goals
 and may dispatch experiments; never run it as a queue or reconciliation shortcut.
 This formula neither resumes old paused goals nor authorizes FunSearch.
 """
+
+[vars.labtech_home]
+description = "Required rig-local runner and queue directory"
+default = ""
+[vars.labtech_pack]
+description = "Required installed labtech pack directory"
+default = ""
+[vars.lab_book]
+description = "Required existing lab-book bead; narrative summaries only"
+default = ""
+
