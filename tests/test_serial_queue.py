@@ -40,7 +40,8 @@ a=sys.argv[1:]
 if 'nudge' in a:
     print('notified'); sys.exit(0)
 a=a[a.index('bd')+1:]
-a=a[2:]
+if a[0]=='--rig': a=a[2:]
+print('configuration diagnostic on stderr',file=sys.stderr)
 cmd, rid = a[:2]
 if cmd=='show':
     print(json.dumps([data[rid]])); sys.exit(0)
@@ -77,6 +78,7 @@ sys.exit(int(sys.argv[2]))
                      'purpose': 'bounded harmless test', 'worktree_owner': 'test/george'}
         self.bead('scope')
         self.bead('authorization')
+        self.bead('city-authorization')
 
     def tearDown(self):
         # Only task-owned child process groups are touched, and only for test cleanup.
@@ -130,6 +132,7 @@ sys.exit(int(sys.argv[2]))
         self.await_receipt(b['attempt_id'])
         self.assertFalse(resumed.run_next()['launched'])
         self.assertEqual(len(resumed.attempts()), 2)
+        self.assertEqual(self.q.bead({'rig': '', 'id': 'city-authorization'})['id'], 'city-authorization')
         for path in resumed.attempts():
             evidence = m.read(path.parent / 'provenance.json')
             self.assertEqual(evidence['source']['revision'], self.revision)

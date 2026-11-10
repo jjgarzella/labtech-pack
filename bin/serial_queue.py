@@ -128,8 +128,14 @@ class Queue:
             raise ValueError("queue belongs to another host; no PID-only cross-host recovery")
 
     def gc(self, *args, rig=None):
-        return capture([self.config["gc"], "--city", self.config["city"],
-                        "bd", "--rig", rig or self.config["rig"], *args])
+        selected_rig = self.config["rig"] if rig is None else rig
+        command = [self.config["gc"], "--city", self.config["city"], "bd"]
+        if selected_rig:
+            command.extend(["--rig", selected_rig])
+        # Configuration diagnostics belong on stderr, never in machine JSON.
+        result = subprocess.run([*command, *args], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=30, check=True)
+        return result.stdout.strip()
 
     def bead(self, ref):
         data = json.loads(self.gc("show", ref["id"], "--json", rig=ref["rig"]))
