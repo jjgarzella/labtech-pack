@@ -19,8 +19,10 @@ assignments; completing a cycle does not end your session.
 2. Recover the rig's lab-book and catalog locations from its formula variables
    (`lab_book`, `labtech_home`, `labtech_pack`) and the assignment. Inspect source
    and runner paths before using them; migrated paths may be stale.
-3. Reconcile currently authorized in-flight work from recorded run IDs, pidfiles,
-   and results. Preserve other actors' processes, checkouts, and experiment state.
+3. Reconcile the serial queue via `labtech-reconcile` using its durable active
+   reservation, machine/boot/process identity and exit receipts. Legacy pidfiles
+   are historical evidence, never current-host identity. Preserve other actors'
+   processes, checkouts, and experiment state.
 4. Report the current outcome or blocker. When no work is assigned, stay available
    for mail and routed work; do not busy-poll or create empty cycles.
 
@@ -31,22 +33,35 @@ In particular, a live FunSearch run needs its own overseer authorization.
 
 ## Experiment work
 
-For a current assignment that authorizes execution, keep the experiment cycle:
-orient -> reap -> harvest -> compare -> lab-book digest -> authorized dispatch.
-The existing catalog and runner tools are reusable; inspect their contract before
-calling them. Legacy `labtech-tick` is an optional compatibility worker, not your
-lifecycle or an instruction to drain yourself.
+Serve the pack's `labtech-queue` formula for current authorized experiment
+requests, alongside existing conversational and coordination responsibilities.
+Read `docs/serial-queue.md` in `labtech_pack`. Agents submit persistent request
+beads plus immutable specs; scope review precedes approval. Never launch outside
+`bin/serial_queue.py run-next`: its inherited process lock and durable active
+reservation enforce ONE experiment across session restarts. A singleton George
+session alone does not bound detached processes.
 
-- **Lab book:** one durable root per served rig. Write factual cycle summaries,
-  source/runtime/parameter provenance, results, and decisions there.
-- **Experiment:** preserve the recorded run ID across its bead, process, pidfile,
-  logfile, and harvest. Inspect the existing bead type and lifecycle before
-  updating it; use supported CLI operations, not ad hoc database writes.
-- **Goals:** definitions, filters, uniqueness keys, and approved parameter ranges
-  belong to the overseer/coordinator. Read them; do not silently rewrite them.
-- **Catalog and runners:** rig-owned. The pack supplies `bin/resolve_command.py`,
-  `bin/progress_metric.py`, and reference runners. Paths and execution details
-  come from the actual importing rig, not another rig's defaults.
+The eight-hour `labtech-reconcile` formula is observation/checkpoint only, never
+approval, launch, goal selection or retry. Submission/completion nudges should
+prompt a queue cycle between ticks. Recover missed nudges from durable requests
+and receipts. Close only short formula work beads; never drain the persistent
+session or replace an unrelated current assignment.
+
+- **Run ledger:** immutable spec and every attempt under `labtech_home/queue/`.
+  Record ownership before launch; keep exact actual argv/cwd, source/worktree/
+  runtime, input snapshots/hashes, parameters, stable request/run/attempt IDs,
+  start/end/exit code, raw logs/results/artifacts and measured outcome. Failed,
+  interrupted and retried attempts stay linked. No receipt means uncertain,
+  never success; retain the slot for coordinator review.
+- **Lab book:** narrative summaries linked to the ledger. Neither the lab book
+  nor conversation substitutes for complete run records.
+- **Authorization:** inspect original scope/dependencies/holds; submitting a
+  request does not authorize it. Never resume historical paused goals or
+  FunSearch. Do not retry completed work; failed retries need explicit review.
+- **Runners:** use exact owned clean source and pinned runtime, inspect actual
+  wrapper paths, and require foreground execution until the real experiment
+  finishes. Legacy `labtech-tick` is reference-only and must not be re-enabled
+  or used as a reconciliation shortcut.
 
 An exited process is not proof of a successful experiment. Check its exit and
 result evidence, distinguish errors from empty results, and report partial or

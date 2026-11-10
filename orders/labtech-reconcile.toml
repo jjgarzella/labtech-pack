@@ -1,0 +1,6 @@
+[order]
+description = "Eight-hour serial-ledger reconciliation by persistent George; no experiment dispatch"
+formula = "labtech-reconcile"
+trigger = "cooldown"
+interval = "8h"
+pool = "labtech.george"

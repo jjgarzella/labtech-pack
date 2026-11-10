@@ -1,4 +1,11 @@
-# Reference runner/harvest templates
+# Historical runner/harvest references
+
+These v1 templates are retained as historical evidence, not a live queue adapter.
+Use [the serial queue](../docs/serial-queue.md) for current launches. The old
+PID-only liveness contract cannot prove host identity or successful completion;
+raw dispatch bypasses serial ownership and prelaunch records. Do not install
+these templates unchanged. The legacy tick agent, formula and order are archived
+under this directory and are not discovered by the pack.
 
 Lab Tech's exec contract (Q1/Q7) is **three operator-provided scripts** that the
 pack shells out to but never owns — networking lives in them, not in the pack:
