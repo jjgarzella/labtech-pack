@@ -53,4 +53,3 @@ default = ""
 [vars.lab_book]
 description = "Required existing lab-book bead; narrative summaries only"
 default = ""
-
