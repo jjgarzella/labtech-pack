@@ -1,28 +1,41 @@
 formula = "labtech-reconcile"
-version = 2
+version = 3
 description = """
 George's eight-hour observation/checkpoint only; never launch, approve, or retry experiments.
 
-Claim this routed formula bead as persistent George without disturbing other work.
-Run `python3 {{labtech_pack}}/bin/serial_queue.py --home {{labtech_home}} reconcile`.
-Read `{{labtech_pack}}/docs/serial-queue.md`. Inspect the active identity/receipt and
-measurement/artifact evidence; retain raw evidence and all attempts. Recover a
-missed completion nudge from the receipt and update the request bead/lab book
-`{{lab_book}}` with request/run/attempt IDs, exit status, measured outcome or missing
-measurement, paths, holds and next action. Active quiet logs are not a failure.
-If unchanged and idle, retain the checkpoint without adding an empty lab-book entry.
+Claim this routed formula task as persistent George without disturbing other work.
+Recover the importing rig from this task's gc.routed_to address and your identity.
+Read the city's effective configuration (`gc config show`) and that rig's
+formula_vars to obtain labtech_home, labtech_pack and lab_book, as on startup.
+Order dispatch on some gc versions does not pass rig formula defaults; therefore
+this formula deliberately contains no compile-time path substitutions. Never
+invent /bin or HOME-relative runner paths when configuration is absent.
 
-This reconciliation step NEVER launches, approves, selects goals, retries, changes
-parameters, kills processes, resumes historical work or invokes `labtech-tick`.
+Read the installed pack docs/serial-queue.md. Set LABTECH_HOME and LABTECH_PACK
+from those exact absolute configuration paths and LAB_BOOK from its existing
+lab-book ID. Validate them before the single observation command:
+
+```sh
+: "${LABTECH_HOME:?Recover exact importing rig labtech_home first}"
+: "${LABTECH_PACK:?Recover exact importing rig labtech_pack first}"
+: "${LAB_BOOK:?Recover the existing importing rig lab_book first}"
+test -f "$LABTECH_PACK/bin/serial_queue.py" &&
+test -f "$LABTECH_HOME/queue/config.json" &&
+python3 "$LABTECH_PACK/bin/serial_queue.py" --home "$LABTECH_HOME" reconcile
+```
+
+Inspect active identity/receipt and measured outcome/artifact evidence; retain raw
+evidence and all attempts. Recover a missed completion nudge from the receipt and
+update the request bead and existing LAB_BOOK with request/run/attempt IDs, exit
+status, measured outcome or missing measurement, paths, holds and next action.
+Active quiet logs are not failure. If unchanged and idle, retain the checkpoint
+without adding an empty lab-book entry. Missing config means record a concrete
+blocker; do not initialize or replace an existing queue or reinterpret old PIDs.
+
+This reconciliation task NEVER launches, approves, selects goals, retries, changes
+parameters, kills processes, resumes historical work or invokes labtech-tick.
 If approved queue work needs service, use a separately authorized labtech-queue
 cycle. Missing exit receipts or identity mismatch require coordinator review and
 retain the active slot. Close only this formula work bead; remain available and
 never drain/reset the persistent session.
 """
-
-[vars.labtech_home]
-default = ""
-[vars.labtech_pack]
-default = ""
-[vars.lab_book]
-default = ""
