@@ -219,6 +219,83 @@ class ReconcileWatchdogTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_late_linked_coordinator_surfaces_bounded_scan_error(self):
+        fixture = Fixture()
+        fixture.coordinator_root["metadata"] = {"title": "workflow root"}
+        fixture.coordinator_root["dependencies"] = [
+            {"id": f"other-duty-{index}", "metadata": {"coordinator": "another/session"}}
+            for index in range(watchdog.MAX_LINKED_DUTIES)
+        ] + [{"id": "late-review-duty", "metadata": {"coordinator": fixture.target}}]
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertFalse(any(item["type"] == "blocked_review" for item in result["findings"]))
+            self.assertTrue(any(error["component"] == "review-root" and
+                                "bounded scan stops at 8" in error["message"]
+                                for error in result["errors"]))
+            self.assertTrue(any(item.get("component") == "review-root"
+                                for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_order_history_at_row_bound_reports_possible_truncation(self):
+        fixture = Fixture()
+        rows = [{"id": f"fresh-root-{index}", "title": "labtech-reconcile",
+                 "status": "open", "assignee": None,
+                 "created_at": watchdog.stamp(fixture.now - timedelta(hours=1))}
+                for index in range(watchdog.MAX_ROWS)]
+        rows.append({**fixture.stale_root, "id": "omitted-stale-root"})
+
+        def runner(argv, timeout):
+            if "bd" in argv and "list" in argv and "--label" in argv:
+                fixture.calls.append((list(argv), timeout))
+                return CompletedProcess(argv, 0, json.dumps(rows[:watchdog.MAX_ROWS]), "")
+            return fixture.runner(argv, timeout)
+
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertEqual(result["status"], "error")
+            self.assertTrue(any(error["component"] == "order-history" and
+                                "reached the 100-row scan bound" in error["message"]
+                                for error in result["errors"]))
+            self.assertFalse(any(item.get("bead_id") == "omitted-stale-root"
+                                 for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_blocked_pause_query_at_row_bound_reports_possible_truncation(self):
+        fixture = Fixture()
+        rows = [{"id": f"blocked-{index}", "title": "awaiting review",
+                 "status": "blocked", "assignee": "worker",
+                 "metadata": {"gasvillage.pause_state": "awaiting_review"}}
+                for index in range(watchdog.MAX_ROWS)]
+        rows.append({"id": "omitted-pause", "status": "blocked",
+                     "metadata": {"gasvillage.pause_state": "awaiting_review"}})
+
+        def runner(argv, timeout):
+            if "bd" in argv and "list" in argv and "--metadata-field" in argv:
+                rig = argv[argv.index("--rig") + 1]
+                if rig == "NewtonExperiments":
+                    fixture.calls.append((list(argv), timeout))
+                    return CompletedProcess(argv, 0, json.dumps(rows[:watchdog.MAX_ROWS]), "")
+            return fixture.runner(argv, timeout)
+
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertEqual(result["status"], "error")
+            self.assertTrue(any(error["component"] == "review-scan" and
+                                "reached the 100-row scan bound" in error["message"]
+                                for error in result["errors"]))
+            self.assertFalse(any(item.get("bead_id") == "omitted-pause"
+                                 for item in result["findings"]))
+        finally:
+            fixture.close()
+
     def test_unlinked_first_pause_is_not_treated_as_a_city_wide_george_duty(self):
         fixture = Fixture()
         fixture.blocked_review["metadata"].pop("gc.root_bead_id")

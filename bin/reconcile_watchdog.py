@@ -23,6 +23,7 @@ MAX_CITY_RIGS = 24
 MAX_REVIEWERS = 8
 MAX_ROWS = 100
 MAX_PAUSE_CANDIDATES = 12
+MAX_LINKED_DUTIES = 8
 MAX_FINDINGS = 40
 CONFIG_TIMEOUT = 15
 STORE_TIMEOUT = 5
@@ -236,6 +237,12 @@ def order_findings(context, target, now, runner):
         findings.append({"type": "store_read_error", "severity": "coordinator",
                          "component": "order-history", "rig": context["rig"], "message": message})
         return findings, errors
+    if len(candidates) >= MAX_ROWS:
+        message = (f"scoped {ORDER_NAME} history reached the {MAX_ROWS}-row scan bound; "
+                   "results may be incomplete")
+        errors.append({"component": "order-history", "rig": context["rig"], "message": message})
+        findings.append({"type": "store_read_error", "severity": "coordinator",
+                         "component": "order-history", "rig": context["rig"], "message": message})
 
     for bead in candidates:
         if not isinstance(bead, dict) or bead.get("status") != "open":
@@ -300,7 +307,10 @@ def linked_review_binding(context, rig, bead, target, runner, root_budget):
     for collection in (root.get("dependencies") or [], root.get("dependents") or []):
         if isinstance(collection, list):
             linked.extend(item for item in collection if isinstance(item, dict))
-    for item in linked[:8]:
+    if len(linked) > MAX_LINKED_DUTIES:
+        return None, (f"durable root {root_rig}/{root_id} has {len(linked)} linked duties; "
+                      f"the bounded scan stops at {MAX_LINKED_DUTIES}, so coordinator ownership is unresolved")
+    for item in linked:
         owner = coordinator_binding(item.get("metadata"), target)
         if owner:
             return {"basis": "linked_duty", "root_bead_id": root_id,
@@ -325,6 +335,12 @@ def blocked_review_findings(context, target, now, runner):
             findings.append({"type": "store_read_error", "severity": "coordinator",
                              "component": "review-scan", "rig": rig, "message": message})
             continue
+        if len(candidates) >= MAX_ROWS:
+            message = (f"blocked pause query in rig {rig} reached the {MAX_ROWS}-row scan bound; "
+                       "results may be incomplete")
+            errors.append({"component": "review-scan", "rig": rig, "message": message})
+            findings.append({"type": "store_read_error", "severity": "coordinator",
+                             "component": "review-scan", "rig": rig, "message": message})
         for bead in candidates:
             if not isinstance(bead, dict) or bead.get("status") != "blocked":
                 continue
