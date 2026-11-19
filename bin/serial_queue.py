@@ -24,6 +24,10 @@ import uuid
 from datetime import datetime, timezone
 
 
+SUBPROCESS_PROBE_TIMEOUT = 30
+PROCESS_GROUP_SCAN_TIMEOUT = 30
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -73,7 +77,7 @@ def label(value):
 
 def capture(argv, cwd=None, env=None):
     return subprocess.check_output(argv, cwd=cwd, env=env, stderr=subprocess.STDOUT,
-                                   timeout=30).decode(errors="replace").strip()
+                                   timeout=SUBPROCESS_PROBE_TIMEOUT).decode(errors="replace").strip()
 
 
 @lru_cache(maxsize=1)
@@ -98,7 +102,7 @@ def process(pid):
 
 def group_members(pgid, exclude):
     probe = subprocess.Popen(["ps", "-axo", "pid=,pgid=,stat="], stdout=subprocess.PIPE)
-    output, _ = probe.communicate(timeout=30)
+    output, _ = probe.communicate(timeout=PROCESS_GROUP_SCAN_TIMEOUT)
     if probe.returncode:
         raise ValueError("could not inspect process group")
     # The ps probe is itself briefly in this group. Exclude its exact PID.

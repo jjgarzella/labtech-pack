@@ -12,7 +12,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from serial_queue import Queue, lock, read, write
+from serial_queue import Queue, SUBPROCESS_PROBE_TIMEOUT, lock, read, write
 
 
 ORDER_NAME = "labtech-reconcile"
@@ -21,6 +21,7 @@ NOTICE_REPEAT = timedelta(hours=24)
 UNKNOWN_RETRY = timedelta(hours=12)
 MAX_CITY_RIGS = 24
 MAX_REVIEWERS = 8
+MAX_NUDGE_RECIPIENTS = MAX_REVIEWERS + 1  # George target plus reviewers; target need not be listed.
 MAX_ROWS = 100
 MAX_PAUSE_CANDIDATES = 12
 MAX_LINKED_DUTIES = 8
@@ -29,12 +30,15 @@ CONFIG_TIMEOUT = 15
 STORE_TIMEOUT = 5
 NUDGE_TIMEOUT = 60
 ORDER_TIMEOUT_SECONDS = 900
+QUEUE_RECONCILE_PROBES = 3  # ioreg + sysctl in Queue construction, then ps for an active attempt
+QUEUE_RECONCILE_PROBE_SECONDS = QUEUE_RECONCILE_PROBES * SUBPROCESS_PROBE_TIMEOUT
 # One config read, at most one order-history query, one pause query per rig,
-# twelve root lookups, and at most eight configured nudge recipients.
+# twelve root lookups, nine nudge recipients, and queue host/process probes.
 MAX_EXTERNAL_COMMAND_SECONDS = (
     CONFIG_TIMEOUT
     + STORE_TIMEOUT * (1 + MAX_CITY_RIGS + MAX_PAUSE_CANDIDATES)
-    + NUDGE_TIMEOUT * MAX_REVIEWERS
+    + NUDGE_TIMEOUT * MAX_NUDGE_RECIPIENTS
+    + QUEUE_RECONCILE_PROBE_SECONDS
 )
 
 

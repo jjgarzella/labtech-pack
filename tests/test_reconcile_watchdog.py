@@ -146,8 +146,10 @@ class ReconcileWatchdogTests(unittest.TestCase):
         self.assertIn("12-hour", formula)
         self.assertGreater(watchdog.NUDGE_TIMEOUT, 36.17)
         self.assertEqual(watchdog.NUDGE_TIMEOUT, 60)
+        self.assertEqual(watchdog.QUEUE_RECONCILE_PROBE_SECONDS, 90)
+        self.assertEqual(watchdog.MAX_NUDGE_RECIPIENTS, 9)
         self.assertEqual(watchdog.ORDER_TIMEOUT_SECONDS, 900)
-        self.assertEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS, 680)
+        self.assertEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS, 830)
         self.assertLessEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS,
                              watchdog.ORDER_TIMEOUT_SECONDS)
 
@@ -164,6 +166,28 @@ class ReconcileWatchdogTests(unittest.TestCase):
             self.assertGreater(nudge_calls[0][1], 36.17)
             self.assertIn("--delivery", nudge_calls[0][0])
             self.assertIn("--json", nudge_calls[0][0])
+        finally:
+            fixture.close()
+
+    def test_eight_reviewers_without_george_fit_nine_recipient_budget(self):
+        fixture = Fixture()
+        queue_config_path = fixture.home / "queue" / "config.json"
+        queue_config = json.loads(queue_config_path.read_text())
+        queue_config["reviewers"] = [f"reviewer-{index}" for index in range(watchdog.MAX_REVIEWERS)]
+        queue_config_path.write_text(json.dumps(queue_config))
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertEqual(result["status"], "observed")
+            self.assertEqual(len(result["notifications"]), watchdog.MAX_NUDGE_RECIPIENTS)
+            nudge_targets = [call[call.index("nudge") + 1]
+                             for call, _timeout in fixture.calls if "nudge" in call]
+            self.assertEqual(len(nudge_targets), watchdog.MAX_NUDGE_RECIPIENTS)
+            self.assertIn(fixture.target, nudge_targets)
+            self.assertEqual(len(set(nudge_targets) - {fixture.target}), watchdog.MAX_REVIEWERS)
+            self.assertTrue(all(timeout == watchdog.NUDGE_TIMEOUT for call, timeout in fixture.calls
+                                if "nudge" in call))
         finally:
             fixture.close()
 
