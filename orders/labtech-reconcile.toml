@@ -3,5 +3,5 @@ description = "12-hour independent ledger and coordinator-duty observer; no expe
 exec = 'python3 "$PACK_DIR/bin/reconcile_watchdog.py"'
 trigger = "cooldown"
 interval = "12h"
-timeout = "300s"
+timeout = "900s"
 no_work_gate = true

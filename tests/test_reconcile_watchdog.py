@@ -139,10 +139,33 @@ class ReconcileWatchdogTests(unittest.TestCase):
         formula = (root / "formulas" / "labtech-reconcile.toml").read_text()
         self.assertRegex(order, r'(?m)^trigger\s*=\s*"cooldown"$')
         self.assertRegex(order, r'(?m)^interval\s*=\s*"12h"$')
+        self.assertRegex(order, r'(?m)^timeout\s*=\s*"900s"$')
         self.assertIn('exec = \'python3 "$PACK_DIR/bin/reconcile_watchdog.py"\'', order)
         self.assertRegex(order, r'(?m)^no_work_gate\s*=\s*true$')
         self.assertNotRegex(order, r'(?m)^formula\s*=')
         self.assertIn("12-hour", formula)
+        self.assertGreater(watchdog.NUDGE_TIMEOUT, 36.17)
+        self.assertEqual(watchdog.NUDGE_TIMEOUT, 60)
+        self.assertEqual(watchdog.ORDER_TIMEOUT_SECONDS, 900)
+        self.assertEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS, 680)
+        self.assertLessEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS,
+                             watchdog.ORDER_TIMEOUT_SECONDS)
+
+    def test_immediate_nudge_timeout_covers_measured_native_delivery_path(self):
+        fixture = Fixture()
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                context = watchdog.discover_context(fixture.env(), fixture.runner)
+            result = watchdog.send_nudge(context, fixture.target, "timing regression", fixture.runner)
+            self.assertEqual(result["status"], "delivered_unverified")
+            nudge_calls = [(argv, timeout) for argv, timeout in fixture.calls if "nudge" in argv]
+            self.assertEqual(len(nudge_calls), 1)
+            self.assertEqual(nudge_calls[0][1], 60)
+            self.assertGreater(nudge_calls[0][1], 36.17)
+            self.assertIn("--delivery", nudge_calls[0][0])
+            self.assertIn("--json", nudge_calls[0][0])
+        finally:
+            fixture.close()
 
     def test_order_exec_quotes_pack_path_with_spaces(self):
         fixture = Fixture()

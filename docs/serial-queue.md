@@ -18,7 +18,10 @@ approves, retries, resumes, or changes held scientific work. George's
 Request and completion nudges provide prompt service between ticks.
 
 The scheduled observer uses Gas City's `no_work_gate = true` exec-order contract
-and its own filesystem lock. First-time pause discovery follows `awaiting_review`
+and its own filesystem lock. Each native immediate nudge is bounded to 60 seconds;
+the order's overall exec limit is 900 seconds. The configured maxima bound
+external command time to 680 seconds across eight recipients, 24 rig scans and
+12 linked-root lookups. First-time pause discovery follows `awaiting_review`
 beads through their durable coordinator, root, or linked-duty metadata instead
 of depending on a reviewer field that appears only after resume. It creates no
 formula work roots; the scheduler's

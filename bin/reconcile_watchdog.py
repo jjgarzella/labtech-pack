@@ -27,7 +27,15 @@ MAX_LINKED_DUTIES = 8
 MAX_FINDINGS = 40
 CONFIG_TIMEOUT = 15
 STORE_TIMEOUT = 5
-NUDGE_TIMEOUT = 10
+NUDGE_TIMEOUT = 60
+ORDER_TIMEOUT_SECONDS = 900
+# One config read, at most one order-history query, one pause query per rig,
+# twelve root lookups, and at most eight configured nudge recipients.
+MAX_EXTERNAL_COMMAND_SECONDS = (
+    CONFIG_TIMEOUT
+    + STORE_TIMEOUT * (1 + MAX_CITY_RIGS + MAX_PAUSE_CANDIDATES)
+    + NUDGE_TIMEOUT * MAX_REVIEWERS
+)
 
 
 class WatchdogError(RuntimeError):
