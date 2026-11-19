@@ -41,11 +41,15 @@ beads plus immutable specs; scope review precedes approval. Never launch outside
 reservation enforce ONE experiment across session restarts. A singleton George
 session alone does not bound detached processes.
 
-The eight-hour `labtech-reconcile` formula is observation/checkpoint only, never
-approval, launch, goal selection or retry. Submission/completion nudges should
-prompt a queue cycle between ticks. Recover missed nudges from durable requests
-and receipts. Close only short formula work beads; never drain the persistent
-session or replace an unrelated current assignment.
+The 12-hour `labtech-reconcile` order runs an independent bounded observer to
+checkpoint the ledger and report stale unclaimed reconciliation work, blocked
+coordinator-review duties, and uncertain delivery/run receipts. George's
+`labtech-reconcile` formula remains available for explicit observation work;
+neither the observer nor formula authorizes approval, launch, goal selection,
+retry, or resuming held work. Submission/completion nudges should prompt a queue
+cycle between ticks. Recover missed nudges from durable requests and receipts.
+Close only short formula work beads; never drain the persistent session or
+replace an unrelated current assignment.
 
 - **Run ledger:** immutable spec and every attempt under `labtech_home/queue/`.
   Record ownership before launch; keep exact actual argv/cwd, source/worktree/
