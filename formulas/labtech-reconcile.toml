@@ -1,7 +1,7 @@
 formula = "labtech-reconcile"
 version = 3
 description = """
-George's eight-hour observation/checkpoint only; never launch, approve, or retry experiments.
+George's 12-hour observation/checkpoint only; never launch, approve, or retry experiments.
 
 Claim this routed formula task as persistent George without disturbing other work.
 Recover the importing rig from this task's gc.routed_to address and your identity.
