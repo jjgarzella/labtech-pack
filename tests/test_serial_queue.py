@@ -199,6 +199,48 @@ sys.exit(int(sys.argv[2]))
         with self.assertRaises(ValueError):
             m.label('../escape')
 
+    def test_workflow_reference_registration_is_validated_idempotent_and_conflict_safe(self):
+        data = m.read(self.store)
+        data['request-link'] = {
+            'id': 'request-link', 'status': 'open', 'parent': 'lab',
+            'labels': ['labtech-request'], 'metadata': {}, 'dependencies': [],
+        }
+        data['preparation'] = {
+            'id': 'preparation', 'status': 'open', 'metadata': {}, 'dependencies': [],
+        }
+        data['different'] = {'id': 'different', 'status': 'open', 'metadata': {}, 'dependencies': []}
+        m.write(self.store, data)
+
+        first = self.q.record_workflow_ref('request-link', 'source-rig', 'preparation')
+        self.assertEqual(first['status'], 'recorded')
+        self.assertEqual(first['workflow_ref'], 'rig:source-rig/preparation')
+        second = self.q.record_workflow_ref('request-link', 'source-rig', 'preparation')
+        self.assertEqual(second['status'], 'already_recorded')
+        stored = m.read(self.store)['request-link']['metadata'][m.WORKFLOW_REF_KEY]
+        self.assertEqual(stored, 'rig:source-rig/preparation')
+
+        with self.assertRaisesRegex(ValueError, 'conflicting overwrite'):
+            self.q.record_workflow_ref('request-link', 'source-rig', 'different')
+        self.assertEqual(m.read(self.store)['request-link']['metadata'][m.WORKFLOW_REF_KEY],
+                         'rig:source-rig/preparation')
+        with self.assertRaisesRegex(ValueError, 'invalid workflow rig'):
+            self.q.record_workflow_ref('request-link', '../outside', 'preparation')
+        with self.assertRaisesRegex(ValueError, 'invalid id'):
+            self.q.record_workflow_ref('request-link', 'source-rig', '../outside')
+
+    def test_workflow_reference_requires_a_live_labbook_request(self):
+        self.bead('not-request')
+        self.bead('preparation')
+        with self.assertRaisesRegex(ValueError, 'configured lab book'):
+            self.q.record_workflow_ref('not-request', 'test', 'preparation')
+        data = m.read(self.store)
+        data['not-request']['parent'] = 'lab'
+        data['not-request']['labels'] = ['labtech-request']
+        data['not-request']['status'] = 'blocked'
+        m.write(self.store, data)
+        with self.assertRaisesRegex(ValueError, 'held/blocked bead'):
+            self.q.record_workflow_ref('not-request', 'test', 'preparation')
+
     def test_pending_review_and_changed_source(self):
         self.bead('request')
         self.q.submit('request', self.spec)

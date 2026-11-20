@@ -36,9 +36,11 @@ Use the [serial queue workflow](docs/serial-queue.md): `labtech-queue` is George
 formula for explicit authorized submissions. Durable request/run/attempt records
 and an inherited process lock enforce one experiment across conversation restarts.
 The 12-hour `labtech-reconcile` order runs an independent bounded observer. It
-checkpoints the serial ledger, detects stale unclaimed reconciliation work,
-George-review blockers and uncertain run receipts, and sends rate-limited nudges
-with retained delivery outcomes. It never launches experiments. George's
+checkpoints the serial ledger, follows configured coordinator ownership and
+linked request/workflow/review duties, detects stale unclaimed reconciliation
+work and uncertain run receipts, and sends rate-limited nudges with retained
+delivery outcomes. It reports missing responsibility links and never launches
+experiments or changes pauses. George's
 `labtech-reconcile` formula remains available for explicit observation work.
 Submission and completion nudges prompt queue service between ticks. Existing
 persistent conversation and other assignments continue; no extra worker or

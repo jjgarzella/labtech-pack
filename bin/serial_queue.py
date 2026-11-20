@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 
 SUBPROCESS_PROBE_TIMEOUT = 30
 PROCESS_GROUP_SCAN_TIMEOUT = 30
+WORKFLOW_REF_KEY = "labtech.workflow_ref"
+RIG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def now():
@@ -70,9 +72,15 @@ def write(path, value):
 
 
 def label(value):
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
-        raise ValueError("invalid id: " + value)
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError("invalid id: " + str(value))
     return value
+
+
+def workflow_ref(rig, bead_id):
+    if not isinstance(rig, str) or not RIG_NAME_RE.fullmatch(rig):
+        raise ValueError("invalid workflow rig: " + str(rig))
+    return "rig:" + rig + "/" + label(bead_id)
 
 
 def capture(argv, cwd=None, env=None):
@@ -171,6 +179,35 @@ class Queue:
 
     def request_dir(self, rid):
         return self.root / "requests" / label(rid)
+
+    def record_workflow_ref(self, rid, workflow_rig, workflow_id):
+        rid = label(rid)
+        ref = workflow_ref(workflow_rig, workflow_id)
+        request_ref = {"rig": self.config["rig"], "id": rid}
+        with lock(self.root / "state.lock"):
+            request = self.permitted(request_ref, request=True)
+            if request.get("parent") != self.config.get("lab_book"):
+                raise ValueError("request bead is not a child of the configured lab book")
+            if "labtech-request" not in (request.get("labels") or []):
+                raise ValueError("request bead is missing the labtech-request label")
+            target = self.bead({"rig": workflow_rig, "id": workflow_id})
+            if target.get("id") != workflow_id:
+                raise ValueError("workflow reference did not resolve to the exact requested bead")
+            metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+            current = metadata.get(WORKFLOW_REF_KEY)
+            if current == ref:
+                return {"request_id": rid, "workflow_ref": ref, "status": "already_recorded"}
+            if current not in (None, ""):
+                raise ValueError(
+                    WORKFLOW_REF_KEY + " already points to " + str(current)
+                    + "; refusing a conflicting overwrite"
+                )
+            self.gc("update", rid, "--set-metadata", WORKFLOW_REF_KEY + "=" + ref)
+            updated = self.bead(request_ref)
+            updated_metadata = updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {}
+            if updated_metadata.get(WORKFLOW_REF_KEY) != ref:
+                raise ValueError("workflow reference write did not persist the exact value")
+        return {"request_id": rid, "workflow_ref": ref, "status": "recorded"}
 
     def actor(self, reviewers=False):
         actor = os.environ.get("GC_AGENT", "")
@@ -555,6 +592,10 @@ def main():
     submit = sub.add_parser("submit")
     submit.add_argument("--request", required=True)
     submit.add_argument("--spec", required=True)
+    record_workflow = sub.add_parser("record-workflow")
+    record_workflow.add_argument("--request", required=True)
+    record_workflow.add_argument("--workflow-rig", required=True)
+    record_workflow.add_argument("--workflow-id", required=True)
     for name in ("approve", "retry"):
         p = sub.add_parser(name)
         p.add_argument("--request", required=True)
@@ -591,6 +632,8 @@ def main():
             return
         if args.command == "submit":
             result = queue.submit(args.request, read(args.spec))
+        elif args.command == "record-workflow":
+            result = queue.record_workflow_ref(args.request, args.workflow_rig, args.workflow_id)
         elif args.command in ("approve", "retry"):
             result = getattr(queue, args.command)(args.request, {"rig": args.authorization_rig, "id": args.authorization_id})
         elif args.command == "resolve-interrupted":
