@@ -77,6 +77,10 @@ LINK_METADATA_FIELDS = (
     ("predecessor_review", "review_dispatch_store_ref"),
     ("labtech.workflow_ref", None),
 )
+NON_CYCLE_BACKLINK_RELATIONS = frozenset({
+    "gc.root_bead_id",
+    "gc.input_convoy_id",
+})
 
 
 class WatchdogError(RuntimeError):
@@ -348,7 +352,31 @@ def has_linked_work_evidence(bead):
 def responsibility_seed_priority(bead):
     if active_status(bead):
         return 0
-    return 1 if has_linked_work_evidence(bead) else 2
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    has_current_link = any(
+        metadata.get(field_name) not in (None, "", False, "false", "0")
+        for field_name, _store_field in LINK_METADATA_FIELDS
+        if field_name not in ("gc.root_bead_id", "predecessor_review")
+    )
+    dependencies = bead.get("dependencies")
+    return 1 if has_current_link or (isinstance(dependencies, list) and bool(dependencies)) else 2
+
+
+def linked_graph_priority(bead, relation, source_priority):
+    if active_status(bead):
+        return 0
+    if relation == "review" and source_priority < 2:
+        return 1
+    return 2
+
+
+def retired_review(bead):
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    return bead.get("status") == "closed" and (
+        metadata.get("gc.outcome") in ("skipped", "abandoned")
+        or metadata.get("gc.review.loop_outcome") in ("replan", "skipped", "abandoned")
+        or metadata.get("work_outcome") in ("abandoned", "skipped")
+    )
 
 
 def rig_from_store_ref(context, current_rig, store_ref, component):
@@ -415,7 +443,7 @@ def bead_refs(context, rig, bead):
     blockers = []
     metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
     bead_id = bead.get("id")
-    review_fields = ("gc.review_dispatch_root", "gc.independent_review_root", "predecessor_review")
+    review_fields = ("gc.review_dispatch_root", "gc.independent_review_root")
     for field_name, store_field in LINK_METADATA_FIELDS:
         ref, error = linked_ref(context, rig, metadata, field_name, store_field)
         if error:
@@ -638,6 +666,10 @@ def coordinator_responsibility_findings(context, target, runner):
                                    f"cannot inspect server-filtered {status_filter} responsibility rows for {filter_label}: {exc}; coverage is partial",
                                    component=component)
                     continue
+                if len(candidates) >= limit:
+                    tracking_error(findings, errors, rig, None,
+                                   f"{status_filter} {filter_label} responsibility query reached its {limit}-row bound; returned rows may be truncated and coverage is partial",
+                                   component=component)
                 for bead in candidates:
                     if not isinstance(bead, dict):
                         tracking_error(findings, errors, rig, None,
@@ -709,8 +741,7 @@ def coordinator_responsibility_findings(context, target, runner):
         key, (bead, _role) = item
         metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
         has_review_link = any(metadata.get(name) not in (None, "", False, "false", "0")
-                              for name in ("gc.review_dispatch_root", "gc.independent_review_root",
-                                           "predecessor_review"))
+                              for name in ("gc.review_dispatch_root", "gc.independent_review_root"))
         return (0 if has_review_link else 1, key)
 
     for key, value in sorted(linked_closed_owners, key=closed_anchor_order)[:MAX_CLOSED_OWNED_ROWS]:
@@ -786,8 +817,7 @@ def coordinator_responsibility_findings(context, target, runner):
                 _key, (bead, _role) = item
                 metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
                 review_link = any(metadata.get(name) not in (None, "", False, "false", "0")
-                                  for name in ("gc.review_dispatch_root", "gc.independent_review_root",
-                                               "predecessor_review"))
+                                  for name in ("gc.review_dispatch_root", "gc.independent_review_root"))
                 return (0 if review_link else 1, item[0])
             request_items.sort(key=request_anchor_order)
         for key, value in request_items[:MAX_CLOSED_REQUEST_ROWS if include_closed else MAX_REQUEST_ROWS]:
@@ -800,16 +830,18 @@ def coordinator_responsibility_findings(context, target, runner):
         tracking_error(findings, errors, context["rig"], None,
                        f"coordinator plus request seed rows exceeded the {MAX_GRAPH_NODES}-node graph bound; coverage is partial")
 
-    active_pending = deque()
-    linked_pending = deque()
+    pending_by_priority = [deque(), deque(), deque()]
     queued_priority = {}
     graph_nodes = {}
     visited = set()
     review_refs = set()
     review_sources = {}
+    review_source_priorities = {}
     pause_roots = {}
     blocking_refs = set()
     blocking_origins = {}
+    blocking_edges = set()
+    membership_edges = set()
     attempted_refs = set()
     graph_lookups = 0
 
@@ -826,15 +858,14 @@ def coordinator_responsibility_findings(context, target, runner):
             return
         queued_priority[ref] = priority
         item = (ref, linked_bead, depth, role, path, priority)
-        (active_pending if priority == 0 else linked_pending).append(item)
+        pending_by_priority[priority].append(item)
 
     for key, (bead, role) in seeds.items():
         priority = responsibility_seed_priority(bead)
-        if priority < 2:
-            enqueue(key, bead, 0, role, frozenset({key}), priority)
+        enqueue(key, bead, 0, role, frozenset({key}), priority)
 
-    while active_pending or linked_pending:
-        pending = active_pending if active_pending else linked_pending
+    while any(pending_by_priority):
+        pending = next(queue for queue in pending_by_priority if queue)
         key, bead, depth, role, path, priority = pending.popleft()
         if queued_priority.get(key) != priority:
             continue
@@ -895,14 +926,33 @@ def coordinator_responsibility_findings(context, target, runner):
             if relation == "blocks":
                 blocking_refs.add(ref)
                 blocking_origins.setdefault(ref, key)
+                blocking_edges.add((key, ref))
+            if relation == "tracks":
+                membership_edges.add((key, ref))
             if relation == "review":
-                review_refs.add(ref)
-                review_sources.setdefault(ref, key)
-                mark_pause_root(ref, min(priority, 1))
+                previous_priority = review_source_priorities.get(ref)
+                if previous_priority is None or priority < previous_priority:
+                    review_source_priorities[ref] = priority
+                    review_sources[ref] = key
             if ref in path:
-                if relation == "gc.root_bead_id" and ref != key:
-                    # Native phases backlink to their owning root. This is
-                    # membership/ownership metadata, not a workflow cycle.
+                native_backlink = relation in NON_CYCLE_BACKLINK_RELATIONS and ref != key
+                native_backlink = native_backlink or (
+                    relation == "tracks" and ref != key and bead.get("status") == "closed"
+                )
+                native_backlink = native_backlink or (
+                    relation in ("source_task", "gc.source_work_bead")
+                    and ref != key and bead.get("status") == "closed"
+                    and (ref, key) in blocking_edges
+                )
+                native_backlink = native_backlink or (
+                    relation == "parent" and ref != key and bead.get("status") == "closed"
+                    and ((ref, key) in membership_edges or (ref, key) in blocking_edges)
+                )
+                if native_backlink:
+                    # Native owner, source, parent, convoy, and closed-phase
+                    # membership back-links retain provenance without forming
+                    # another executable workflow edge. Other semantic loops
+                    # still produce the cycle diagnostic below.
                     continue
                 tracking_error(findings, errors, key[0], key[1],
                                f"cycle detected in explicit responsibility link to {ref[0]}/{ref[1]}; the repeated node was deduplicated",
@@ -916,9 +966,7 @@ def coordinator_responsibility_findings(context, target, runner):
                 continue
             if ref in seeds:
                 linked_bead, linked_role = seeds[ref]
-                linked_priority = 0 if active_status(linked_bead) else priority
-                if relation == "review" and linked_priority > 0:
-                    linked_priority = 1
+                linked_priority = linked_graph_priority(linked_bead, relation, priority)
                 enqueue(ref, linked_bead, depth + 1, linked_role, path | {ref}, linked_priority)
                 continue
             if ref in attempted_refs:
@@ -936,10 +984,24 @@ def coordinator_responsibility_findings(context, target, runner):
                                f"cannot read explicit {relation} link from {key[0]}/{key[1]}: {exc}",
                                component="linked-bead")
                 continue
-            linked_priority = 0 if active_status(linked_bead) else priority
-            if relation == "review" and linked_priority > 0:
-                linked_priority = 1
+            linked_priority = linked_graph_priority(linked_bead, relation, priority)
             enqueue(ref, linked_bead, depth + 1, relation, path | {ref}, linked_priority)
+
+    for ref, source_priority in review_source_priorities.items():
+        review_bead = graph_nodes.get(ref)
+        if review_bead is None:
+            if source_priority < 2:
+                tracking_error(findings, errors, ref[0], ref[1],
+                               "explicit review-dispatch root was not readable in the tracked graph",
+                               component="review-convergence")
+            continue
+        if retired_review(review_bead):
+            continue
+        if source_priority >= 2 and not active_status(review_bead):
+            continue
+        review_refs.add(ref)
+        current_priority = 0 if active_status(review_bead) else min(source_priority, 1)
+        mark_pause_root(ref, current_priority)
 
     for ref in sorted(blocking_refs):
         prerequisite = graph_nodes.get(ref)
@@ -962,8 +1024,15 @@ def coordinator_responsibility_findings(context, target, runner):
         if root_ref in seen_root_refs:
             continue
         if len(seen_root_refs) >= MAX_TRACKED_ROOTS:
+            current_root_count = sum(priority < 2 for priority in pause_roots.values())
+            if current_root_count > MAX_TRACKED_ROOTS:
+                message = (f"current linked workflow root scan exceeded the {MAX_TRACKED_ROOTS}-root bound; "
+                           "current pause coverage is partial")
+            else:
+                message = (f"linked workflow root scan exceeded the {MAX_TRACKED_ROOTS}-root bound after "
+                           "current roots; retired-history pause coverage is partial")
             tracking_error(findings, errors, root_ref[0], root_ref[1],
-                           f"linked workflow root scan exceeded the {MAX_TRACKED_ROOTS}-root bound; coverage is partial",
+                           message,
                            component="linked-pause-scan")
             break
         seen_root_refs.add(root_ref)
@@ -972,9 +1041,6 @@ def coordinator_responsibility_findings(context, target, runner):
     for ref in sorted(review_refs):
         review_bead = graph_nodes.get(ref)
         if review_bead is None:
-            tracking_error(findings, errors, ref[0], ref[1],
-                           "explicit review-dispatch root was not readable in the tracked graph",
-                           component="review-convergence")
             continue
         source_ref = review_sources.get(ref, ref)
         finding = review_finding(ref[0], review_bead, source_ref)

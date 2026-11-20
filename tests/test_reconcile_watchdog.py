@@ -359,6 +359,74 @@ class ReconcileWatchdogTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_reachable_retired_history_does_not_consume_current_pause_or_review_priority(self):
+        fixture = Fixture()
+        source = {
+            "id": "zz-source", "status": "in_progress",
+            "metadata": {"coordinator": fixture.target,
+                         "gc.review_dispatch_root": "zz-current-review"},
+            "dependencies": [],
+        }
+        current_review = {
+            "id": "zz-current-review", "status": "in_progress",
+            "metadata": {"coordinator": fixture.target}, "dependencies": [],
+        }
+        fixture.owned_by_rig = {"NewtonExperiments": [source, current_review]}
+        fixture.blocked_review["metadata"]["gc.root_bead_id"] = "zz-current-review"
+        for index in range(8):
+            phase_id = f"historic-trigger-{index:02}"
+            root_id = f"historic-root-{index:02}"
+            review_id = f"historic-review-{index:02}"
+            source["dependencies"].append({
+                "issue_id": "zz-source", "depends_on_id": phase_id, "type": "blocks",
+                "metadata": "{}",
+            })
+            fixture.linked_beads[("NewtonExperiments", phase_id)] = {
+                "id": phase_id, "status": "closed",
+                "metadata": {"gc.root_bead_id": root_id,
+                             "gc.review_dispatch_root": review_id},
+                "dependencies": [],
+            }
+            fixture.linked_beads[("NewtonExperiments", root_id)] = {
+                "id": root_id, "status": "closed", "metadata": {"gc.outcome": "pass"},
+                "dependencies": [],
+            }
+            fixture.linked_beads[("NewtonExperiments", review_id)] = {
+                "id": review_id, "status": "closed",
+                "metadata": {"gc.outcome": "skipped",
+                             "gc.review.loop_outcome": "replan",
+                             "work_outcome": "abandoned"},
+                "dependencies": [],
+            }
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertTrue(any(item["type"] == "blocked_review"
+                                and item["bead_id"] == "blocked-review"
+                                for item in result["findings"]))
+            self.assertTrue(any(item["type"] == "active_independent_review"
+                                and item["bead_id"] == "zz-current-review"
+                                for item in result["findings"]))
+            self.assertFalse(any(item["type"] == "review_not_converged"
+                                 and item["bead_id"].startswith("historic-review-")
+                                 for item in result["findings"]))
+            pause_queries = [argv for argv, _timeout in fixture.calls
+                             if "gasvillage.pause_state=awaiting_review" in argv]
+            self.assertEqual(len(pause_queries), 20)
+            self.assertIn("gc.root_bead_id=zz-current-review", pause_queries[0])
+            self.assertEqual(pause_queries[1][pause_queries[1].index("--parent") + 1],
+                             "zz-current-review")
+            lookups = [argv for argv, _timeout in fixture.calls if "--id" in argv]
+            self.assertEqual(len(lookups), watchdog.MAX_GRAPH_LOOKUPS)
+            self.assertFalse(any("linked bead reads exceeded" in error["message"]
+                                 for error in result["errors"]))
+            self.assertFalse(any(error["component"] == "linked-pause-scan"
+                                and "current pause coverage is partial" in error["message"]
+                                for error in result["errors"]))
+        finally:
+            fixture.close()
+
     def test_immediate_nudge_timeout_covers_measured_native_delivery_path(self):
         fixture = Fixture()
         try:
@@ -697,6 +765,58 @@ class ReconcileWatchdogTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_retired_predecessor_review_is_history_not_a_current_review_gate(self):
+        cases = (
+            ("in_progress", {}, "active_independent_review"),
+            ("closed", {"gc.review.loop_outcome": "done",
+                         "gc.review.synthesis_verdict": "pass",
+                         "gc.review.test_result": "pass"}, None),
+        )
+        for current_status, current_metadata, expected_current_finding in cases:
+            with self.subTest(current_status=current_status):
+                fixture = Fixture()
+                fixture.coordinator_root.update({
+                    "status": "closed" if current_status == "closed" else "in_progress",
+                    "metadata": {"coordinator": fixture.target,
+                                 "predecessor_review": "retired-review",
+                                 "gc.review_dispatch_root": "current-review"},
+                })
+                fixture.linked_beads[("NewtonExperiments", "retired-review")] = {
+                    "id": "retired-review", "status": "closed",
+                    "metadata": {"gc.outcome": "skipped",
+                                 "gc.review.loop_outcome": "replan",
+                                 "gc.review.synthesis_verdict": "pass_with_findings",
+                                 "gc.review.test_result": "pass",
+                                 "work_outcome": "abandoned"},
+                    "dependencies": [],
+                }
+                fixture.linked_beads[("NewtonExperiments", "current-review")] = {
+                    "id": "current-review", "status": current_status,
+                    "metadata": current_metadata, "dependencies": [],
+                }
+                try:
+                    with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                        result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                                       lambda _home: fixture.queue, fixture.now)
+                    review_findings = [item for item in result["findings"]
+                                       if item["type"] in ("active_independent_review",
+                                                           "blocked_review_workflow",
+                                                           "review_not_converged")]
+                    if expected_current_finding:
+                        self.assertTrue(any(item["type"] == expected_current_finding
+                                            and item["bead_id"] == "current-review"
+                                            for item in review_findings))
+                    else:
+                        self.assertEqual(review_findings, [])
+                    self.assertFalse(any(item.get("bead_id") == "retired-review"
+                                         and item["type"] == "review_not_converged"
+                                         for item in result["findings"]))
+                    lookups = [argv[argv.index("--id") + 1] for argv, _timeout in fixture.calls
+                               if "--id" in argv]
+                    self.assertIn("retired-review", lookups)
+                finally:
+                    fixture.close()
+
     def test_closed_review_with_only_outcome_pass_is_not_treated_as_converged(self):
         fixture = Fixture()
         fixture.coordinator_root.update({
@@ -872,6 +992,93 @@ class ReconcileWatchdogTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_native_review_convoy_tracks_backlink_is_not_reported_as_a_cycle(self):
+        fixture = Fixture()
+        fixture.coordinator_root.update({
+            "status": "closed",
+            "metadata": {"coordinator": fixture.target,
+                         "gc.review_dispatch_root": "current-review"},
+            "dependencies": [{
+                "issue_id": "coordinator-root", "depends_on_id": "finalizer", "type": "tracks",
+                "metadata": "{}",
+            }],
+        })
+        fixture.linked_beads[("NewtonExperiments", "finalizer")] = {
+            "id": "finalizer", "status": "closed",
+            "metadata": {"gc.root_bead_id": "coordinator-root",
+                         "gc.review_dispatch_root": "current-review"},
+            "dependencies": [],
+        }
+        fixture.linked_beads[("NewtonExperiments", "current-review")] = {
+            "id": "current-review", "status": "in_progress",
+            "metadata": {"gc.input_convoy_id": "review-convoy"}, "dependencies": [],
+        }
+        fixture.linked_beads[("NewtonExperiments", "review-convoy")] = {
+            "id": "review-convoy", "status": "closed", "metadata": {},
+            "dependencies": [{
+                "issue_id": "review-convoy", "depends_on_id": "coordinator-root", "type": "tracks",
+                "metadata": "{}",
+            }],
+        }
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertTrue(any(item["type"] == "active_independent_review"
+                                and item["bead_id"] == "current-review"
+                                for item in result["findings"]))
+            self.assertFalse(any(item["type"] == "tracking_error"
+                                 and item.get("component") == "linked-bead"
+                                 and "cycle detected" in item.get("message", "")
+                                 for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_closed_implementation_source_task_backlink_to_blocking_source_is_membership(self):
+        fixture = Fixture()
+        fixture.coordinator_root["dependencies"] = [{
+            "issue_id": "coordinator-root", "depends_on_id": "closed-implementation", "type": "blocks",
+            "metadata": "{}",
+        }]
+        fixture.linked_beads[("NewtonExperiments", "closed-implementation")] = {
+            "id": "closed-implementation", "status": "closed",
+            "metadata": {"source_task": "coordinator-root"}, "dependencies": [],
+        }
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertTrue(any(item["type"] == "coordinator_responsibility"
+                                and item["bead_id"] == "coordinator-root"
+                                for item in result["findings"]))
+            self.assertFalse(any(item["type"] == "tracking_error"
+                                 and item.get("component") == "linked-bead"
+                                 and "cycle detected" in item.get("message", "")
+                                 for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_closed_parent_backlink_to_tracks_owner_is_membership(self):
+        fixture = Fixture()
+        fixture.coordinator_root["dependencies"] = [{
+            "issue_id": "coordinator-root", "depends_on_id": "closed-child", "type": "tracks",
+            "metadata": "{}",
+        }]
+        fixture.linked_beads[("NewtonExperiments", "closed-child")] = {
+            "id": "closed-child", "status": "closed", "parent": "coordinator-root",
+            "metadata": {}, "dependencies": [],
+        }
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertFalse(any(item["type"] == "tracking_error"
+                                 and item.get("component") == "linked-bead"
+                                 and "cycle detected" in item.get("message", "")
+                                 for item in result["findings"]))
+        finally:
+            fixture.close()
+
     def test_native_json_string_dependency_metadata_preserves_cross_rig_store(self):
         fixture = Fixture()
         fixture.coordinator_root["dependencies"] = [{
@@ -939,6 +1146,47 @@ class ReconcileWatchdogTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_closed_owner_query_saturation_is_reported_before_link_filtering(self):
+        fixture = Fixture()
+        root_only_history = [
+            {"id": f"old-owner-{index:02}", "status": "closed",
+             "metadata": {"coordinator": fixture.target,
+                          "gc.root_bead_id": f"old-root-{index:02}"},
+             "dependencies": []}
+            for index in range(watchdog.MAX_CLOSED_OWNED_ROWS + 1)
+        ]
+        current_source = {
+            "id": "zz-closed-current-implementation", "status": "closed",
+            "metadata": {"coordinator": fixture.target,
+                         "gc.review_dispatch_root": "current-review"},
+            "dependencies": [],
+        }
+        fixture.owned_by_rig["NewtonExperiments"] = [*root_only_history, current_source]
+
+        def bounded_runner(argv, timeout):
+            result = fixture.runner(argv, timeout)
+            if "list" in argv and "--max-rows" in argv and result.returncode == 0:
+                limit = int(argv[argv.index("--max-rows") + 1])
+                rows = json.loads(result.stdout)
+                return CompletedProcess(argv, 0, json.dumps(rows[:limit]), result.stderr)
+            return result
+
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), bounded_runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            saturation = [error for error in result["errors"]
+                          if error["component"] == "closed-responsibility-scan"
+                          and "query reached its 65-row bound" in error["message"]]
+            self.assertTrue(saturation)
+            self.assertTrue(any(item["type"] == "tracking_error"
+                                and item["component"] == "closed-responsibility-scan"
+                                and "coverage is partial" in item["message"]
+                                for item in result["findings"]))
+            self.assertTrue(result["errors"])
+        finally:
+            fixture.close()
+
     def test_linked_workflow_root_budget_reports_partial_coverage(self):
         fixture = Fixture()
         fixture.owned_by_rig["NewtonExperiments"] = [
@@ -952,6 +1200,9 @@ class ReconcileWatchdogTests(unittest.TestCase):
                                                lambda _home: fixture.queue, fixture.now)
             self.assertTrue(any(error["component"] == "linked-pause-scan" and
                                 "12-root bound" in error["message"]
+                                for error in result["errors"]))
+            self.assertTrue(any(error["component"] == "linked-pause-scan" and
+                                "current pause coverage is partial" in error["message"]
                                 for error in result["errors"]))
         finally:
             fixture.close()
