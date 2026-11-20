@@ -19,14 +19,24 @@ Request and completion nudges provide prompt service between ticks.
 
 The scheduled observer uses Gas City's `no_work_gate = true` exec-order contract
 and its own filesystem lock. Each native immediate nudge is bounded to 60 seconds;
-the order's overall exec limit is 900 seconds. The configured maxima bound
-external command time to 867 seconds, including George plus eight configured
-reviewers, up to 24 coordinator-filtered rig scans, 24 linked-bead lookups,
-12 workflow roots with two scoped pause queries each, and up to 90 seconds for
-queue host/process probes. The target does not need to appear in the reviewer
-list. Responsibility discovery starts from the configured coordinator binding
-and lab-book request beads, then follows explicit workflow, parent, dependency,
-delegation, source, and review-dispatch links. First-time pause discovery follows
+the order's overall exec limit is 1800 seconds. The configured maxima bound
+external command time to 1518 seconds: one 15-second effective-config read;
+291 store reads at three seconds each (order history, up to 24 rigs times four
+coordinator metadata aliases plus exact assignee in separate active and closed
+passes, two lab-book request passes, 24 linked-bead lookups, and 12 workflow
+roots with two scoped pause queries each); up to nine immediate nudges at 60
+seconds each; and up to 90 seconds for queue host/process probes. The remaining
+282 seconds cover process and state handling. The order is pack-scoped; no
+city-wide timeout or runtime setting is changed; a city-level
+`orders.max_timeout` still caps pack order timeouts. The target does not need to
+appear in the reviewer list. Responsibility discovery starts from the
+configured coordinator metadata keys (`coordinator`, `gc.coordinator`,
+`gasvillage.coordinator`, and `gasvillage.reviewer`), exact direct assignments,
+and lab-book request beads, then follows explicit workflow, parent, dependency, delegation, source,
+and review-dispatch links. Active owner/request anchors and their reachable roots
+and reviews are read before linked closed source/review evidence. Closed owner
+history with only an owning-root backlink is terminal and is not expanded, so it
+cannot consume active graph or pause budgets. First-time pause discovery follows
 `awaiting_review` beads through those linked workflow roots instead of depending
 on reviewer metadata that may appear only after resume. An active request without
 a structured workflow link is reported as a tracking error. It creates no

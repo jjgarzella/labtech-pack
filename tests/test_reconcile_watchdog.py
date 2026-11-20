@@ -116,9 +116,17 @@ class Fixture:
                 return CompletedProcess(argv, 2, "", "store unavailable")
             if "--label" in argv:
                 if "order-run:labtech-reconcile:rig:experiments" in argv:
-                    return CompletedProcess(argv, 0, json.dumps([self.stale_root]), "")
+                    rows = [self.stale_root]
+                    if "--status" in argv:
+                        statuses = set(argv[argv.index("--status") + 1].split(","))
+                        rows = [row for row in rows if row.get("status") in statuses]
+                    return CompletedProcess(argv, 0, json.dumps(rows), "")
                 if "labtech-request" in argv:
-                    return CompletedProcess(argv, 0, json.dumps(self.request_rows), "")
+                    rows = self.request_rows
+                    if "--status" in argv:
+                        statuses = set(argv[argv.index("--status") + 1].split(","))
+                        rows = [row for row in rows if row.get("status") in statuses]
+                    return CompletedProcess(argv, 0, json.dumps(rows), "")
             if "--id" in argv:
                 bead_id = argv[argv.index("--id") + 1]
                 matches = [bead for (stored_rig, _stored_id), bead in self.linked_beads.items()
@@ -129,11 +137,16 @@ class Fixture:
                 return CompletedProcess(argv, 0, json.dumps(matches[:1]), "")
             if "--metadata-field" in argv:
                 fields = [argv[i + 1] for i, value in enumerate(argv[:-1]) if value == "--metadata-field"]
-                coordinator_filter = next((value.split("=", 1)[1] for value in fields
-                                           if value.startswith("coordinator=")), None)
-                if coordinator_filter is not None:
+                ownership_filter = next(((name, value.split("=", 1)[1])
+                                         for name in watchdog.COORDINATOR_METADATA_KEYS
+                                         for value in fields if value.startswith(name + "=")), None)
+                if ownership_filter is not None:
+                    name, target = ownership_filter
                     rows = [bead for bead in self.owned_by_rig.get(rig, [])
-                            if (bead.get("metadata") or {}).get("coordinator") == coordinator_filter]
+                            if (bead.get("metadata") or {}).get(name) == target]
+                    if "--status" in argv:
+                        statuses = set(argv[argv.index("--status") + 1].split(","))
+                        rows = [bead for bead in rows if bead.get("status") in statuses]
                     return CompletedProcess(argv, 0, json.dumps(rows), "")
                 if "gasvillage.pause_state=awaiting_review" in fields:
                     root_filter = next((value.split("=", 1)[1] for value in fields
@@ -148,6 +161,13 @@ class Fixture:
                                 if bead.get("parent") == parent]
                         return CompletedProcess(argv, 0, json.dumps(rows), "")
                     return CompletedProcess(argv, 0, json.dumps(self.unrelated_pauses), "")
+            if "--assignee" in argv:
+                target = argv[argv.index("--assignee") + 1]
+                rows = [bead for bead in self.owned_by_rig.get(rig, []) if bead.get("assignee") == target]
+                if "--status" in argv:
+                    statuses = set(argv[argv.index("--status") + 1].split(","))
+                    rows = [bead for bead in rows if bead.get("status") in statuses]
+                return CompletedProcess(argv, 0, json.dumps(rows), "")
             if "--parent" in argv and "--label" not in argv:
                 parent = argv[argv.index("--parent") + 1]
                 rows = [bead for bead in self.unrelated_pauses + [self.blocked_review]
@@ -175,7 +195,7 @@ class ReconcileWatchdogTests(unittest.TestCase):
         formula = (root / "formulas" / "labtech-reconcile.toml").read_text()
         self.assertRegex(order, r'(?m)^trigger\s*=\s*"cooldown"$')
         self.assertRegex(order, r'(?m)^interval\s*=\s*"12h"$')
-        self.assertRegex(order, r'(?m)^timeout\s*=\s*"900s"$')
+        self.assertRegex(order, r'(?m)^timeout\s*=\s*"1800s"$')
         self.assertIn('exec = \'python3 "$PACK_DIR/bin/reconcile_watchdog.py"\'', order)
         self.assertRegex(order, r'(?m)^no_work_gate\s*=\s*true$')
         self.assertNotRegex(order, r'(?m)^formula\s*=')
@@ -184,10 +204,160 @@ class ReconcileWatchdogTests(unittest.TestCase):
         self.assertEqual(watchdog.NUDGE_TIMEOUT, 60)
         self.assertEqual(watchdog.QUEUE_RECONCILE_PROBE_SECONDS, 90)
         self.assertEqual(watchdog.MAX_NUDGE_RECIPIENTS, 9)
-        self.assertEqual(watchdog.ORDER_TIMEOUT_SECONDS, 900)
-        self.assertEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS, 867)
+        self.assertEqual(watchdog.OWNERSHIP_FILTERS_PER_RIG, 5)
+        self.assertEqual(watchdog.MAX_OWNERSHIP_QUERIES, 240)
+        self.assertEqual(watchdog.MAX_REQUEST_QUERIES, 2)
+        self.assertEqual(watchdog.ORDER_TIMEOUT_SECONDS, 1800)
+        self.assertEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS, 1518)
+        self.assertGreaterEqual(watchdog.ORDER_TIMEOUT_SECONDS - watchdog.MAX_EXTERNAL_COMMAND_SECONDS, 240)
         self.assertLessEqual(watchdog.MAX_EXTERNAL_COMMAND_SECONDS,
                              watchdog.ORDER_TIMEOUT_SECONDS)
+
+    def test_legacy_gc_coordinator_alias_is_a_server_filtered_seed(self):
+        fixture = Fixture()
+        fixture.coordinator_root["metadata"] = {"gc.coordinator": fixture.target}
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            duty = next(item for item in result["findings"]
+                        if item.get("bead_id") == "coordinator-root"
+                        and item["type"] == "coordinator_responsibility")
+            self.assertEqual(duty["coordinator_metadata_key"], "gc.coordinator")
+            self.assertTrue(any("gc.coordinator=" + fixture.target in argv
+                                for argv, _timeout in fixture.calls))
+        finally:
+            fixture.close()
+
+    def test_direct_assignee_is_a_seed_and_reported_separately_from_coordinator_metadata(self):
+        fixture = Fixture()
+        fixture.coordinator_root["metadata"] = {}
+        fixture.coordinator_root["assignee"] = fixture.target
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            duty = next(item for item in result["findings"]
+                        if item.get("bead_id") == "coordinator-root"
+                        and item["type"] == "coordinator_responsibility")
+            self.assertIsNone(duty["coordinator"])
+            self.assertEqual(duty["responsibility_owner"], fixture.target)
+            self.assertEqual(duty["responsibility_source"], "direct_assignment")
+            self.assertEqual(duty["assignee"], fixture.target)
+            self.assertTrue(any("--assignee" in argv and
+                                argv[argv.index("--assignee") + 1] == fixture.target
+                                for argv, _timeout in fixture.calls))
+            self.assertTrue(any(item["type"] == "blocked_review"
+                                and item["bead_id"] == "blocked-review"
+                                for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_seed_scan_uses_bounded_native_filters_for_each_alias_and_status_tier(self):
+        fixture = Fixture()
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                watchdog.run_observer(fixture.env(), fixture.runner,
+                                      lambda _home: fixture.queue, fixture.now)
+            seed_queries = [argv for argv, _timeout in fixture.calls
+                            if ("--assignee" in argv or
+                                any(argv[index + 1].startswith(
+                                        tuple(key + "=" for key in watchdog.COORDINATOR_METADATA_KEYS))
+                                    for index, value in enumerate(argv[:-1])
+                                    if value == "--metadata-field"))]
+            self.assertEqual(len(seed_queries), len(fixture.effective_config["config"]["Rigs"])
+                             * watchdog.OWNERSHIP_FILTERS_PER_RIG * 2)
+            self.assertEqual({argv[argv.index("--status") + 1] for argv in seed_queries},
+                             {",".join(watchdog.ACTIVE_STATUSES), "closed"})
+            for argv in seed_queries:
+                self.assertIn("--brief", argv)
+                self.assertIn("--max-rows", argv)
+                self.assertIn("--json", argv)
+        finally:
+            fixture.close()
+
+    def _install_closed_history_graph(self, fixture, historical_count, active_owner=True):
+        historical = []
+        for index in range(historical_count):
+            root_id = f"historic-root-{index:02}"
+            historical.append({
+                "id": f"historic-owner-{index:02}", "status": "closed",
+                "metadata": {"coordinator": fixture.target, "gc.root_bead_id": root_id},
+                "dependencies": [],
+            })
+            fixture.linked_beads[("NewtonExperiments", root_id)] = {
+                "id": root_id, "status": "closed", "metadata": {}, "dependencies": [],
+            }
+        rows = list(historical)
+        if active_owner:
+            rows.append({
+                "id": "zz-current-owner", "status": "in_progress",
+                "metadata": {"coordinator": fixture.target,
+                             "gc.root_bead_id": "zz-current-root",
+                             "gc.review_dispatch_root": "zz-current-review"},
+                "dependencies": [],
+            })
+            fixture.linked_beads[("NewtonExperiments", "zz-current-root")] = {
+                "id": "zz-current-root", "status": "in_progress", "metadata": {}, "dependencies": [],
+            }
+            fixture.linked_beads[("NewtonExperiments", "zz-current-review")] = {
+                "id": "zz-current-review", "status": "in_progress", "metadata": {}, "dependencies": [],
+            }
+            fixture.blocked_review["metadata"]["gc.root_bead_id"] = "zz-current-root"
+        fixture.owned_by_rig = {"NewtonExperiments": rows}
+
+    def test_closed_terminal_history_does_not_starve_active_pause_or_review_budget(self):
+        for historical_count in (12, 24):
+            fixture = Fixture()
+            try:
+                self._install_closed_history_graph(fixture, historical_count)
+                with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                    result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                                   lambda _home: fixture.queue, fixture.now)
+                self.assertTrue(any(item["type"] == "blocked_review"
+                                    and item["bead_id"] == "blocked-review"
+                                    for item in result["findings"]))
+                self.assertTrue(any(item["type"] == "active_independent_review"
+                                    and item["bead_id"] == "zz-current-review"
+                                    for item in result["findings"]))
+                pause_queries = [argv for argv, _timeout in fixture.calls
+                                 if "gasvillage.pause_state=awaiting_review" in argv]
+                self.assertTrue(any("gc.root_bead_id=zz-current-root" in argv
+                                    for argv in pause_queries))
+                lookups = [argv for argv, _timeout in fixture.calls if "--id" in argv]
+                self.assertEqual(len(lookups), 2)
+                self.assertEqual({argv[argv.index("--id") + 1] for argv in lookups},
+                                 {"zz-current-root", "zz-current-review"})
+                self.assertFalse(any("linked bead reads exceeded" in error["message"]
+                                     for error in result["errors"]))
+            finally:
+                fixture.close()
+
+    def test_closed_source_only_anchor_still_reaches_active_review_ahead_of_history(self):
+        fixture = Fixture()
+        try:
+            self._install_closed_history_graph(fixture, 24, active_owner=False)
+            source = {
+                "id": "closed-current-source", "status": "closed",
+                "metadata": {"coordinator": fixture.target,
+                             "gc.review_dispatch_root": "still-active-review"},
+                "dependencies": [],
+            }
+            fixture.owned_by_rig["NewtonExperiments"].append(source)
+            fixture.linked_beads[("NewtonExperiments", "still-active-review")] = {
+                "id": "still-active-review", "status": "in_progress", "metadata": {}, "dependencies": [],
+            }
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertTrue(any(item["type"] == "active_independent_review"
+                                and item["bead_id"] == "still-active-review"
+                                for item in result["findings"]))
+            lookups = [argv for argv, _timeout in fixture.calls if "--id" in argv]
+            self.assertEqual(len(lookups), 1)
+            self.assertEqual(lookups[0][lookups[0].index("--id") + 1], "still-active-review")
+        finally:
+            fixture.close()
 
     def test_immediate_nudge_timeout_covers_measured_native_delivery_path(self):
         fixture = Fixture()
@@ -675,10 +845,84 @@ class ReconcileWatchdogTests(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_native_finalizer_root_backlink_is_not_reported_as_a_cycle(self):
+        fixture = Fixture()
+        fixture.coordinator_root["status"] = "closed"
+        fixture.coordinator_root["dependencies"] = [{
+            "issue_id": "coordinator-root", "depends_on_id": "finalizer", "type": "tracks",
+            "metadata": "{}",
+        }]
+        fixture.linked_beads[("NewtonExperiments", "finalizer")] = {
+            "id": "finalizer", "status": "closed",
+            "metadata": {"gc.root_bead_id": "coordinator-root",
+                         "gc.root_store_ref": "rig:NewtonExperiments"},
+            "dependencies": [],
+        }
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertFalse(any(item["type"] == "tracking_error"
+                                 and item.get("component") == "linked-bead"
+                                 and "cycle detected" in item.get("message", "")
+                                 for item in result["findings"]))
+            self.assertTrue(any(item["type"] == "blocked_review"
+                                and item["bead_id"] == "blocked-review"
+                                for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_native_json_string_dependency_metadata_preserves_cross_rig_store(self):
+        fixture = Fixture()
+        fixture.coordinator_root["dependencies"] = [{
+            "issue_id": "coordinator-root", "depends_on_id": "cross-blocker", "type": "blocks",
+            "metadata": json.dumps({"gc.edge_store_ref": "rig:DeRham"}),
+        }]
+        fixture.linked_beads[("DeRham", "cross-blocker")] = {
+            "id": "cross-blocker", "status": "blocked", "metadata": {}, "dependencies": [],
+        }
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertTrue(any(item["type"] == "blocked_prerequisite"
+                                and item["rig"] == "DeRham" and item["bead_id"] == "cross-blocker"
+                                and item["status"] == "blocked"
+                                for item in result["findings"]))
+            self.assertTrue(any(argv[argv.index("--rig") + 1] == "DeRham"
+                                and argv[argv.index("--id") + 1] == "cross-blocker"
+                                for argv, _timeout in fixture.calls if "--id" in argv))
+            self.assertFalse(any("cannot read explicit blocks link" in error["message"]
+                                 for error in result["errors"]))
+        finally:
+            fixture.close()
+
+    def test_malformed_or_unconfigured_native_dependency_store_metadata_is_reported(self):
+        for raw_metadata, expected_message in (
+            ("not-json", "malformed JSON dependency metadata"),
+            (json.dumps({"gc.edge_store_ref": "rig:Unconfigured"}), "unconfigured rig store"),
+        ):
+            fixture = Fixture()
+            fixture.coordinator_root["dependencies"] = [{
+                "issue_id": "coordinator-root", "depends_on_id": "cross-blocker", "type": "blocks",
+                "metadata": raw_metadata,
+            }]
+            try:
+                with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                    result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                                   lambda _home: fixture.queue, fixture.now)
+                self.assertTrue(any(item["type"] == "tracking_error"
+                                    and expected_message in item["message"]
+                                    for item in result["findings"]))
+                self.assertFalse(any("--id" in argv and "cross-blocker" in argv
+                                     for argv, _timeout in fixture.calls))
+            finally:
+                fixture.close()
+
     def test_owned_responsibility_row_budget_reports_partial_coverage(self):
         fixture = Fixture()
         fixture.owned_by_rig["NewtonExperiments"] = [
-            {"id": f"owner-{index}", "status": "closed",
+            {"id": f"owner-{index}", "status": "in_progress",
              "metadata": {"coordinator": fixture.target}, "dependencies": []}
             for index in range(watchdog.MAX_OWNED_ROWS + 1)
         ]
@@ -686,11 +930,11 @@ class ReconcileWatchdogTests(unittest.TestCase):
             with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
                 result = watchdog.run_observer(fixture.env(), fixture.runner,
                                                lambda _home: fixture.queue, fixture.now)
-            self.assertTrue(any(error["component"] == "responsibility-tracking" and
-                                "relevant-work budget" in error["message"]
+            self.assertTrue(any(error["component"] == "responsibility-seed-scan" and
+                                "active coordinator responsibility scan exceeded" in error["message"]
                                 for error in result["errors"]))
             self.assertTrue(any(item["type"] == "tracking_error"
-                                and "relevant-work budget" in item["message"]
+                                and "active coordinator responsibility scan exceeded" in item["message"]
                                 for item in result["findings"]))
         finally:
             fixture.close()
