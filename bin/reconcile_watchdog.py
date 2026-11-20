@@ -6,13 +6,16 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 
-from serial_queue import Queue, SUBPROCESS_PROBE_TIMEOUT, lock, read, write
+from serial_queue import Queue, SUBPROCESS_PROBE_TIMEOUT, label, lock, read, write
 
 
 ORDER_NAME = "labtech-reconcile"
@@ -23,22 +26,45 @@ MAX_CITY_RIGS = 24
 MAX_REVIEWERS = 8
 MAX_NUDGE_RECIPIENTS = MAX_REVIEWERS + 1  # George target plus reviewers; target need not be listed.
 MAX_ROWS = 100
+MAX_OWNED_ROWS = 64
+MAX_REQUEST_ROWS = 64
+MAX_GRAPH_NODES = 128
+MAX_GRAPH_LOOKUPS = 24
+MAX_GRAPH_DEPTH = 6
+MAX_TRACKED_ROOTS = 12
 MAX_PAUSE_CANDIDATES = 12
 MAX_LINKED_DUTIES = 8
+MAX_ATTEMPT_ROWS = 100
 MAX_FINDINGS = 40
 CONFIG_TIMEOUT = 15
-STORE_TIMEOUT = 5
+STORE_TIMEOUT = 3
 NUDGE_TIMEOUT = 60
 ORDER_TIMEOUT_SECONDS = 900
 QUEUE_RECONCILE_PROBES = 3  # ioreg + sysctl in Queue construction, then ps for an active attempt
 QUEUE_RECONCILE_PROBE_SECONDS = QUEUE_RECONCILE_PROBES * SUBPROCESS_PROBE_TIMEOUT
-# One config read, at most one order-history query, one pause query per rig,
-# twelve root lookups, nine nudge recipients, and queue host/process probes.
+# One config read, one order-history query, 24 coordinator queries, one lab-book
+# request query, 24 linked-bead lookups, 12 root-scoped pause queries (metadata
+# and parent paths), nine nudge recipients, and queue host/process probes.
 MAX_EXTERNAL_COMMAND_SECONDS = (
     CONFIG_TIMEOUT
-    + STORE_TIMEOUT * (1 + MAX_CITY_RIGS + MAX_PAUSE_CANDIDATES)
+    + STORE_TIMEOUT * (1 + MAX_CITY_RIGS + 1 + MAX_GRAPH_LOOKUPS + 2 * MAX_TRACKED_ROOTS)
     + NUDGE_TIMEOUT * MAX_NUDGE_RECIPIENTS
     + QUEUE_RECONCILE_PROBE_SECONDS
+)
+
+BEAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+RIG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+LINK_METADATA_FIELDS = (
+    ("gc.root_bead_id", "gc.root_store_ref"),
+    ("gc.review_dispatch_root", "gc.review_dispatch_store_ref"),
+    ("gc.independent_review_root", "gc.independent_review_store_ref"),
+    ("gc.input_convoy_id", "gc.root_store_ref"),
+    ("source_task", "source_store_ref"),
+    ("gc.source_work_bead", "gc.source_store_ref"),
+    ("delegated_work_phase", "delegated_work_store_ref"),
+    ("replan_successor", "replan_store_ref"),
+    ("predecessor_review", "review_dispatch_store_ref"),
+    ("labtech.workflow_ref", None),
 )
 
 
@@ -181,7 +207,7 @@ def discover_context(environ=None, runner=run_command):
         raise WatchdogError("effective city configuration contains a rig without a name")
     if len(rig_names) > MAX_CITY_RIGS:
         raise WatchdogError(
-            f"effective city has {len(rig_names)} rigs; reviewer scan is bounded at {MAX_CITY_RIGS}"
+            f"effective city has {len(rig_names)} rigs; coordinator scan is bounded at {MAX_CITY_RIGS}"
         )
     if rig_name not in rig_names:
         raise WatchdogError(f"importing rig {rig_name!r} is not present in the effective rig list")
@@ -217,15 +243,18 @@ def run_bd_list(context, rig, args, runner):
 
 
 def run_bd_show(context, rig, bead_id, runner):
+    # bd list --id returns the same identity/metadata/edge fields without the
+    # unbounded description and notes returned by bd show.
     argv = [str(context["gc"]), "--city", str(context["city"]), "--rig", rig,
-            "bd", "show", bead_id, "--json"]
+            "bd", "list", "--id", bead_id, "--all", "--brief",
+            "--max-rows", "2", "--json"]
     value = command_json(argv, runner=runner, timeout=STORE_TIMEOUT,
-                         label=f"coordinator/root lookup for {rig}/{bead_id}")
-    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
-        return value[0]
-    if isinstance(value, dict) and value.get("id") == bead_id:
-        return value
-    raise WatchdogError(f"coordinator/root lookup for {rig}/{bead_id} returned no exact bead")
+                         label=f"linked bead lookup for {rig}/{bead_id}")
+    candidates = rows(value)
+    matches = [item for item in candidates if isinstance(item, dict) and item.get("id") == bead_id]
+    if len(matches) == 1:
+        return matches[0]
+    raise WatchdogError(f"linked bead lookup for {rig}/{bead_id} returned {len(matches)} exact rows")
 
 
 def finding_key(finding):
@@ -281,125 +310,532 @@ def order_findings(context, target, now, runner):
 
 
 def coordinator_binding(metadata, target):
-    metadata = metadata or {}
+    metadata = metadata if isinstance(metadata, dict) else {}
     for key in ("coordinator", "gc.coordinator", "gasvillage.coordinator", "gasvillage.reviewer"):
         if metadata.get(key) == target:
             return key
     return None
 
 
-def linked_review_binding(context, rig, bead, target, runner, root_budget):
-    metadata = bead.get("metadata") or {}
-    direct = coordinator_binding(metadata, target)
-    if direct:
-        return {"basis": "pause_bead", "coordinator_bead_id": bead.get("id"), "metadata_key": direct}, None
+def rig_from_store_ref(context, current_rig, store_ref, component):
+    if store_ref in (None, ""):
+        return current_rig
+    if not isinstance(store_ref, str):
+        raise ValueError(f"{component} has a non-string store reference")
+    rig = store_ref[4:] if store_ref.startswith("rig:") else store_ref
+    if not RIG_NAME_RE.fullmatch(rig):
+        raise ValueError(f"{component} has malformed store reference {store_ref!r}")
+    if rig not in context["rig_names"]:
+        raise ValueError(f"{component} points to unconfigured rig store {rig!r}")
+    return rig
 
-    root_id = metadata.get("gc.root_bead_id") or bead.get("parent_id")
-    if not root_id:
+
+def parse_workflow_ref(context, value, component):
+    if not isinstance(value, str) or not value.startswith("rig:") or "/" not in value[4:]:
+        raise ValueError(f"{component} must use rig:<rig>/<bead-id>")
+    rig, bead_id = value[4:].split("/", 1)
+    if not RIG_NAME_RE.fullmatch(rig) or rig not in context["rig_names"]:
+        raise ValueError(f"{component} names an invalid or unconfigured rig store {rig!r}")
+    if not BEAD_ID_RE.fullmatch(bead_id):
+        raise ValueError(f"{component} has malformed bead ID {bead_id!r}")
+    return (rig, bead_id)
+
+
+def linked_ref(context, rig, metadata, field_name, store_field):
+    value = metadata.get(field_name)
+    if value in (None, ""):
         return None, None
-    root_store = metadata.get("gc.root_store_ref") or ""
-    root_rig = root_store[4:] if root_store.startswith("rig:") else rig
-    if root_rig not in context["rig_names"]:
-        return None, f"pause bead {rig}/{bead.get('id')} points to unknown root store {root_store!r}"
-    if root_budget[0] >= MAX_PAUSE_CANDIDATES:
-        return None, f"pause root lookup bound {MAX_PAUSE_CANDIDATES} reached; additional held work was not inspected"
-    root_budget[0] += 1
+    component = f"{field_name} on {rig}"
+    if field_name == "labtech.workflow_ref":
+        try:
+            return parse_workflow_ref(context, value, component), None
+        except ValueError as exc:
+            return None, str(exc)
+    if not isinstance(value, str):
+        return None, f"{component} is not a string bead ID"
+    if value.startswith("rig:"):
+        try:
+            return parse_workflow_ref(context, value, component), None
+        except ValueError as exc:
+            return None, str(exc)
+    if not BEAD_ID_RE.fullmatch(value):
+        return None, f"{component} has malformed bead ID {value!r}"
+    store_ref = metadata.get(store_field) if store_field else None
+    if not store_ref:
+        store_ref = metadata.get("gc.root_store_ref")
     try:
-        root = run_bd_show(context, root_rig, str(root_id), runner)
-    except WatchdogError as exc:
-        return None, f"cannot inspect durable root {root_rig}/{root_id} for blocked pause {rig}/{bead.get('id')}: {exc}"
-    owner = coordinator_binding(root.get("metadata"), target)
-    if owner:
-        return {"basis": "root_coordinator", "root_bead_id": root_id,
-                "coordinator_bead_id": root.get("id"), "metadata_key": owner}, None
-
-    # Some coordinators record ownership on a linked duty under the workflow
-    # root. Inspect only the bounded links included in the root's durable record.
-    linked = []
-    for collection in (root.get("dependencies") or [], root.get("dependents") or []):
-        if isinstance(collection, list):
-            linked.extend(item for item in collection if isinstance(item, dict))
-    if len(linked) > MAX_LINKED_DUTIES:
-        return None, (f"durable root {root_rig}/{root_id} has {len(linked)} linked duties; "
-                      f"the bounded scan stops at {MAX_LINKED_DUTIES}, so coordinator ownership is unresolved")
-    for item in linked:
-        owner = coordinator_binding(item.get("metadata"), target)
-        if owner:
-            return {"basis": "linked_duty", "root_bead_id": root_id,
-                    "coordinator_bead_id": item.get("id"), "metadata_key": owner}, None
-    return None, None
+        return (rig_from_store_ref(context, rig, store_ref, component), value), None
+    except ValueError as exc:
+        return None, str(exc)
 
 
-def blocked_review_findings(context, target, now, runner):
-    findings = []
+def tracking_error(findings, errors, rig, bead_id, message, component="responsibility-tracking"):
+    errors.append({"component": component, "rig": rig, "bead_id": bead_id, "message": message})
+    findings.append({"type": "tracking_error", "severity": "coordinator", "component": component,
+                     "rig": rig, "bead_id": bead_id, "message": message})
+
+
+def bead_refs(context, rig, bead):
+    refs = []
     errors = []
-    root_budget = [0]
-    pause_count = 0
-    for rig in context["rig_names"]:
+    blockers = []
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    bead_id = bead.get("id")
+    for field_name, store_field in LINK_METADATA_FIELDS:
+        ref, error = linked_ref(context, rig, metadata, field_name, store_field)
+        if error:
+            errors.append(error)
+        elif ref:
+            relation = "review" if field_name in (
+                "gc.review_dispatch_root", "gc.independent_review_root"
+            ) else field_name
+            refs.append((ref, relation))
+
+    parent = bead.get("parent") or bead.get("parent_id")
+    if parent:
+        parent_ref, error = linked_ref(context, rig, {"parent": parent}, "parent", None)
+        if error:
+            errors.append(error)
+        elif parent_ref:
+            refs.append((parent_ref, "parent"))
+
+    dependencies = bead.get("dependencies") or []
+    if not isinstance(dependencies, list):
+        errors.append(f"{rig}/{bead_id} has an unreadable dependency list")
+        dependencies = []
+    if len(dependencies) > MAX_LINKED_DUTIES:
+        errors.append(f"{rig}/{bead_id} has {len(dependencies)} dependency links; scan bound is {MAX_LINKED_DUTIES}")
+    for edge in dependencies[:MAX_LINKED_DUTIES]:
+        if not isinstance(edge, dict):
+            errors.append(f"{rig}/{bead_id} has a malformed dependency link")
+            continue
+        dep_id = edge.get("id") or edge.get("depends_on_id") or edge.get("issue_id")
+        dep_type = edge.get("dependency_type") or edge.get("type")
+        if not dep_type:
+            errors.append(f"{rig}/{bead_id} has a dependency without a relationship type")
+            continue
+        if not isinstance(dep_id, str) or not BEAD_ID_RE.fullmatch(dep_id):
+            errors.append(f"{rig}/{bead_id} has a malformed {dep_type} dependency ID {dep_id!r}")
+            continue
+        edge_metadata = edge.get("metadata") if isinstance(edge.get("metadata"), dict) else {}
+        dep_store = edge.get("store_ref") or edge_metadata.get("gc.edge_store_ref")
+        try:
+            dep_rig = rig_from_store_ref(context, rig, dep_store, f"{dep_type} dependency from {rig}/{bead_id}")
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        refs.append(((dep_rig, dep_id), dep_type))
+        dep_status = edge.get("status")
+        if dep_type == "blocks" and dep_status and dep_status != "closed":
+            blockers.append({
+                "type": "blocked_prerequisite", "severity": "coordinator" if dep_status in ("blocked", "deferred") else "george",
+                "rig": dep_rig, "bead_id": dep_id, "status": dep_status,
+                "coordinator_bead_id": bead_id, "coordinator_rig": rig,
+                "title": edge.get("title", ""),
+                "message": "blocking prerequisite remains open on its original bead",
+            })
+
+    unique_refs = []
+    seen = set()
+    for ref, relation in refs:
+        if ref not in seen:
+            seen.add(ref)
+            unique_refs.append((ref, relation))
+    return unique_refs, errors, blockers
+
+
+def active_responsibility_finding(rig, bead, target):
+    status = bead.get("status")
+    if status not in ("open", "in_progress", "blocked", "deferred"):
+        return None
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    if metadata.get("gasvillage.pause_state") == "awaiting_review":
+        return None
+    explicit_pause = any(metadata.get(key) not in (None, "", False, "false", "0")
+                         for key in ("dispatch_hold", "pause_requested", "coordinator_review_required"))
+    if metadata.get("gasvillage.pause_state") == "awaiting_review" or status == "blocked":
+        kind, severity = "blocked_responsibility", "coordinator"
+    elif explicit_pause or status == "deferred":
+        kind, severity = "explicit_pause", "coordinator"
+    else:
+        kind, severity = "coordinator_responsibility", "george"
+    return {
+        "type": kind, "severity": severity, "rig": rig, "bead_id": bead.get("id"),
+        "title": bead.get("title", ""), "status": status, "assignee": bead.get("assignee"),
+        "coordinator": target, "coordinator_metadata_key": coordinator_binding(metadata, target),
+        "pause_state": metadata.get("gasvillage.pause_state"),
+        "message": "durable coordinator responsibility remains tracked; executor identity is reported separately",
+    }
+
+
+def review_converged(bead):
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    return (
+        bead.get("status") == "closed"
+        and metadata.get("gc.review.loop_outcome") == "done"
+        and metadata.get("gc.review.synthesis_verdict") == "pass"
+        and metadata.get("gc.review.test_result") == "pass"
+    )
+
+
+def review_finding(rig, bead, source_ref):
+    status = bead.get("status")
+    if review_converged(bead):
+        return None
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    if status in ("open", "in_progress"):
+        kind, severity = "active_independent_review", "george"
+        message = "implementation completion does not discharge responsibility while its independent review is active"
+    elif status in ("blocked", "deferred"):
+        kind, severity = "blocked_review_workflow", "coordinator"
+        message = "independent review workflow is blocked on its original bead"
+    else:
+        kind, severity = "review_not_converged", "coordinator"
+        message = "closed review lacks recorded synthesis and test convergence evidence"
+    return {
+        "type": kind, "severity": severity, "rig": rig, "bead_id": bead.get("id"),
+        "title": bead.get("title", ""), "status": status, "assignee": bead.get("assignee"),
+        "source_workflow": f"rig:{source_ref[0]}/{source_ref[1]}",
+        "review_loop_outcome": metadata.get("gc.review.loop_outcome"),
+        "synthesis_verdict": metadata.get("gc.review.synthesis_verdict"),
+        "test_result": metadata.get("gc.review.test_result"),
+        "message": message,
+    }
+
+
+def add_pause_findings(context, root_ref, runner, findings, errors, seen_pauses):
+    rig, root_id = root_ref
+    queries = (
+        ["--metadata-field", f"gc.root_bead_id={root_id}"],
+        ["--parent", root_id],
+    )
+    for scope_args in queries:
         try:
             candidates = run_bd_list(context, rig, [
                 "--status", "blocked", "--metadata-field", "gasvillage.pause_state=awaiting_review",
-                "--brief", "--max-rows", str(MAX_ROWS), "--json",
+                *scope_args, "--brief", "--max-rows", str(MAX_PAUSE_CANDIDATES + 1), "--json",
             ], runner)
         except WatchdogError as exc:
-            message = f"cannot inspect blocked George-review work in rig {rig}: {exc}"
-            errors.append({"component": "review-scan", "rig": rig, "message": message})
-            findings.append({"type": "store_read_error", "severity": "coordinator",
-                             "component": "review-scan", "rig": rig, "message": message})
+            tracking_error(findings, errors, rig, root_id,
+                           f"cannot inspect pauses linked to rig:{rig}/{root_id}: {exc}",
+                           component="linked-pause-scan")
             continue
-        if len(candidates) >= MAX_ROWS:
-            message = (f"blocked pause query in rig {rig} reached the {MAX_ROWS}-row scan bound; "
-                       "results may be incomplete")
-            errors.append({"component": "review-scan", "rig": rig, "message": message})
-            findings.append({"type": "store_read_error", "severity": "coordinator",
-                             "component": "review-scan", "rig": rig, "message": message})
-        for bead in candidates:
+        if len(candidates) > MAX_PAUSE_CANDIDATES:
+            tracking_error(findings, errors, rig, root_id,
+                           f"linked pause rows exceeded the {MAX_PAUSE_CANDIDATES}-row bound; coverage is partial",
+                           component="linked-pause-scan")
+        for bead in candidates[:MAX_PAUSE_CANDIDATES]:
             if not isinstance(bead, dict) or bead.get("status") != "blocked":
                 continue
-            metadata = bead.get("metadata") or {}
+            metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
             if metadata.get("gasvillage.pause_state") != "awaiting_review":
                 continue
-            pause_count += 1
-            if pause_count > MAX_PAUSE_CANDIDATES:
-                message = f"blocked pause scan exceeded the bounded {MAX_PAUSE_CANDIDATES}-bead coordinator/root limit"
-                errors.append({"component": "review-scan", "rig": rig, "message": message})
-                findings.append({"type": "store_read_error", "severity": "coordinator",
-                                 "component": "review-scan", "rig": rig, "message": message})
-                return findings, errors
-            binding, binding_error = linked_review_binding(context, rig, bead, target, runner, root_budget)
-            if binding_error:
-                errors.append({"component": "review-root", "rig": rig, "bead_id": bead.get("id"),
-                               "message": binding_error})
-                findings.append({"type": "store_read_error", "severity": "coordinator",
-                                 "component": "review-root", "rig": rig, "bead_id": bead.get("id"),
-                                 "message": binding_error})
+            pause_id = bead.get("id")
+            if not isinstance(pause_id, str) or not BEAD_ID_RE.fullmatch(pause_id):
+                tracking_error(findings, errors, rig, root_id,
+                               "linked pause query returned a row without a valid original bead ID",
+                               component="linked-pause-scan")
                 continue
-            if not binding:
+            key = (rig, pause_id)
+            if key in seen_pauses:
                 continue
-            created = iso_time(bead.get("created_at"))
-            age = now - created if created else timedelta(0)
+            seen_pauses.add(key)
             findings.append({
-                "type": "blocked_review", "severity": "coordinator" if age >= NOTICE_REPEAT else "george",
-                "rig": rig, "bead_id": bead.get("id"), "title": bead.get("title", ""),
-                **binding,
-                "status": "blocked", "assignee": bead.get("assignee"),
-                "created_at": stamp(created) if created else None,
-                "updated_at": bead.get("updated_at"), "age_seconds": int(age.total_seconds()),
+                "type": "blocked_review", "severity": "coordinator", "rig": rig,
+                "bead_id": pause_id, "title": bead.get("title", ""), "status": "blocked",
+                "assignee": bead.get("assignee"), "root_bead_id": root_id,
                 "pause_state": metadata.get("gasvillage.pause_state"),
                 "review_condition": metadata.get("gasvillage.review_condition"),
-                "message": "original blocked pause is linked to a durable George coordinator, root, or duty record",
+                "message": "original blocked pause is linked to a configured coordinator workflow",
             })
+
+
+def coordinator_responsibility_findings(context, target, runner):
+    findings = []
+    errors = []
+    seeds = {}
+    owner_count = 0
+    owner_overflow = False
+    for rig in context["rig_names"]:
+        remaining = MAX_OWNED_ROWS - owner_count
+        if remaining <= 0:
+            tracking_error(findings, errors, rig, None,
+                           f"coordinator responsibility scan reached the city-wide {MAX_OWNED_ROWS}-row bound; later rigs were not inspected")
+            owner_overflow = True
+            break
+        query_limit = remaining + 1
+        try:
+            candidates = run_bd_list(context, rig, [
+                "--metadata-field", f"coordinator={target}", "--all", "--brief",
+                "--max-rows", str(query_limit), "--json",
+            ], runner)
+        except WatchdogError as exc:
+            tracking_error(findings, errors, rig, None,
+                           f"cannot inspect server-filtered coordinator responsibilities: {exc}")
+            continue
+        if len(candidates) > remaining:
+            candidates = candidates[:remaining]
+            tracking_error(findings, errors, rig, None,
+                           f"coordinator responsibility scan exceeded its {MAX_OWNED_ROWS}-row relevant-work budget; coverage is partial")
+            owner_overflow = True
+        for bead in candidates:
+            if not isinstance(bead, dict):
+                tracking_error(findings, errors, rig, None, "coordinator query returned a malformed bead row")
+                continue
+            metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+            if metadata.get("coordinator") != target:
+                tracking_error(findings, errors, rig, bead.get("id"),
+                               "server-filtered coordinator query returned a row without the exact configured coordinator binding")
+                continue
+            bead_id = bead.get("id")
+            if not isinstance(bead_id, str) or not BEAD_ID_RE.fullmatch(bead_id):
+                tracking_error(findings, errors, rig, None, "coordinator query returned a malformed bead ID")
+                continue
+            key = (rig, bead_id)
+            seeds[key] = (bead, "coordinator")
+            owner_count += 1
+            duty = active_responsibility_finding(rig, bead, target)
+            if duty:
+                findings.append(duty)
+        if owner_overflow:
+            break
+
+    try:
+        request_rows = run_bd_list(context, context["rig"], [
+            "--parent", context["lab_book"], "--label", "labtech-request", "--all", "--brief",
+            "--max-rows", str(MAX_REQUEST_ROWS + 1), "--json",
+        ], runner)
+    except WatchdogError as exc:
+        request_rows = []
+        tracking_error(findings, errors, context["rig"], context["lab_book"],
+                       f"cannot inspect configured lab-book request beads: {exc}", component="request-scan")
+    if len(request_rows) > MAX_REQUEST_ROWS:
+        request_rows = request_rows[:MAX_REQUEST_ROWS]
+        tracking_error(findings, errors, context["rig"], context["lab_book"],
+                       f"lab-book request scan exceeded its {MAX_REQUEST_ROWS}-row bound; coverage is partial",
+                       component="request-scan")
+
+    request_links = {}
+    for bead in request_rows:
+        if not isinstance(bead, dict):
+            tracking_error(findings, errors, context["rig"], context["lab_book"],
+                           "lab-book request query returned a malformed row", component="request-scan")
+            continue
+        bead_id = bead.get("id")
+        labels = bead.get("labels") if isinstance(bead.get("labels"), list) else []
+        if bead.get("parent") != context["lab_book"] or "labtech-request" not in labels:
+            tracking_error(findings, errors, context["rig"], bead_id,
+                           "lab-book request query returned a bead outside its configured parent/label scope",
+                           component="request-scan")
+            continue
+        if not isinstance(bead_id, str) or not BEAD_ID_RE.fullmatch(bead_id):
+            tracking_error(findings, errors, context["rig"], None,
+                           "lab-book request query returned a malformed bead ID", component="request-scan")
+            continue
+        key = (context["rig"], bead_id)
+        seeds[key] = (bead, "request")
+        metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+        raw_link = metadata.get("labtech.workflow_ref")
+        if raw_link:
+            ref, error = linked_ref(context, context["rig"], metadata, "labtech.workflow_ref", None)
+            if error:
+                tracking_error(findings, errors, context["rig"], bead_id, error, component="request-link")
+            elif ref:
+                request_links[key] = ref
+        elif bead.get("status") in ("open", "in_progress", "blocked", "deferred"):
+            tracking_error(findings, errors, context["rig"], bead_id,
+                           "active labtech-request bead has no structured labtech.workflow_ref; preparation/workflow coverage is unresolved",
+                           component="request-link")
+        if bead.get("status") in ("open", "in_progress", "blocked", "deferred"):
+            findings.append({
+                "type": "labtech_request", "severity": "coordinator" if bead.get("status") in ("blocked", "deferred") else "george",
+                "rig": context["rig"], "bead_id": bead_id, "title": bead.get("title", ""),
+                "status": bead.get("status"), "workflow_ref": raw_link,
+                "message": "configured lab-book request is tracked before executable queue submission",
+            })
+
+    if len(seeds) > MAX_GRAPH_NODES:
+        tracking_error(findings, errors, context["rig"], None,
+                       f"coordinator plus request seed rows exceeded the {MAX_GRAPH_NODES}-node graph bound; coverage is partial")
+
+    pending = deque()
+    for key, (bead, role) in seeds.items():
+        pending.append((key, bead, 0, role, frozenset({key})))
+    graph_nodes = {}
+    visited = set()
+    review_refs = set()
+    review_sources = {}
+    pause_roots = set()
+    blocking_refs = set()
+    blocking_origins = {}
+    attempted_refs = set()
+    graph_lookups = 0
+    while pending:
+        key, bead, depth, role, path = pending.popleft()
+        if key in visited:
+            continue
+        if len(visited) >= MAX_GRAPH_NODES:
+            tracking_error(findings, errors, key[0], key[1],
+                           f"linked responsibility graph exceeded the {MAX_GRAPH_NODES}-node bound; coverage is partial")
+            break
+        visited.add(key)
+        graph_nodes[key] = bead
+        if bead.get("metadata") not in (None, {}) and not isinstance(bead.get("metadata"), dict):
+            tracking_error(findings, errors, key[0], key[1],
+                           "linked bead metadata has an unreadable non-object shape")
+        metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+        if metadata.get("gasvillage.pause_state") == "awaiting_review" and bead.get("status") == "blocked":
+            findings.append({
+                "type": "blocked_review", "severity": "coordinator", "rig": key[0],
+                "bead_id": key[1], "title": bead.get("title", ""), "status": "blocked",
+                "assignee": bead.get("assignee"), "pause_state": "awaiting_review",
+                "message": "original blocked pause is linked through the coordinator responsibility graph",
+            })
+        if bead.get("status") in ("blocked", "deferred") and role not in ("coordinator", "request"):
+            findings.append({
+                "type": "blocked_responsibility", "severity": "coordinator", "rig": key[0],
+                "bead_id": key[1], "title": bead.get("title", ""), "status": bead.get("status"),
+                "assignee": bead.get("assignee"),
+                "message": "linked workflow prerequisite remains blocked on its original bead",
+            })
+        owner_key = coordinator_binding(metadata, target)
+        if owner_key and role not in ("coordinator", "request"):
+            duty = active_responsibility_finding(key[0], bead, target)
+            if duty:
+                findings.append(duty)
+
+        root_value = metadata.get("gc.root_bead_id")
+        if root_value:
+            ref, error = linked_ref(context, key[0], metadata, "gc.root_bead_id", "gc.root_store_ref")
+            if error:
+                tracking_error(findings, errors, key[0], key[1], error)
+            elif ref:
+                pause_roots.add(ref)
+        elif role == "coordinator" and bead.get("status") in ("open", "in_progress", "blocked", "deferred"):
+            pause_roots.add(key)
+        elif role == "request" and key in request_links:
+            pause_roots.add(request_links[key])
+        elif role == "labtech.workflow_ref" or (
+            role == "source_task" and bead.get("status") in ("open", "in_progress", "blocked", "deferred")
+        ):
+            pause_roots.add(key)
+
+        refs, ref_errors, blockers = bead_refs(context, key[0], bead)
+        for error in ref_errors:
+            tracking_error(findings, errors, key[0], key[1], error)
+        findings.extend(blockers)
+        for ref, relation in refs:
+            if relation == "blocks":
+                blocking_refs.add(ref)
+                blocking_origins.setdefault(ref, key)
+            if relation == "review":
+                review_refs.add(ref)
+                review_sources.setdefault(ref, key)
+                pause_roots.add(ref)
+            if ref in path:
+                tracking_error(findings, errors, key[0], key[1],
+                               f"cycle detected in explicit responsibility link to {ref[0]}/{ref[1]}; the repeated node was deduplicated",
+                               component="linked-bead")
+                continue
+            if ref in visited:
+                continue
+            if depth >= MAX_GRAPH_DEPTH:
+                tracking_error(findings, errors, key[0], key[1],
+                               f"linked responsibility graph reached the depth {MAX_GRAPH_DEPTH} bound at {ref[0]}/{ref[1]}")
+                continue
+            if ref in seeds:
+                pending.append((ref, seeds[ref][0], depth + 1, seeds[ref][1], path | {ref}))
+                continue
+            already_queued = any(item[0] == ref for item in pending)
+            if already_queued:
+                continue
+            if ref in attempted_refs:
+                continue
+            if graph_lookups >= MAX_GRAPH_LOOKUPS:
+                tracking_error(findings, errors, key[0], key[1],
+                               f"linked bead reads exceeded the {MAX_GRAPH_LOOKUPS}-lookup bound; coverage is partial")
+                continue
+            graph_lookups += 1
+            attempted_refs.add(ref)
+            try:
+                linked_bead = run_bd_show(context, ref[0], ref[1], runner)
+            except WatchdogError as exc:
+                tracking_error(findings, errors, ref[0], ref[1],
+                               f"cannot read explicit {relation} link from {key[0]}/{key[1]}: {exc}",
+                               component="linked-bead")
+                continue
+            pending.append((ref, linked_bead, depth + 1, relation, path | {ref}))
+
+    for ref in sorted(blocking_refs):
+        prerequisite = graph_nodes.get(ref)
+        if prerequisite is None or prerequisite.get("status") == "closed":
+            continue
+        origin = blocking_origins.get(ref)
+        findings.append({
+            "type": "blocked_prerequisite",
+            "severity": "coordinator" if prerequisite.get("status") in ("blocked", "deferred") else "george",
+            "rig": ref[0], "bead_id": ref[1], "title": prerequisite.get("title", ""),
+            "status": prerequisite.get("status"),
+            "coordinator_bead_id": origin[1] if origin else None,
+            "coordinator_rig": origin[0] if origin else None,
+            "message": "blocking prerequisite remains open on its original bead",
+        })
+
+    seen_pauses = set()
+    seen_root_refs = set()
+    for root_ref in sorted(pause_roots):
+        if root_ref in seen_root_refs:
+            continue
+        if len(seen_root_refs) >= MAX_TRACKED_ROOTS:
+            tracking_error(findings, errors, root_ref[0], root_ref[1],
+                           f"linked workflow root scan exceeded the {MAX_TRACKED_ROOTS}-root bound; coverage is partial",
+                           component="linked-pause-scan")
+            break
+        seen_root_refs.add(root_ref)
+        add_pause_findings(context, root_ref, runner, findings, errors, seen_pauses)
+
+    for ref in sorted(review_refs):
+        review_bead = graph_nodes.get(ref)
+        if review_bead is None:
+            tracking_error(findings, errors, ref[0], ref[1],
+                           "explicit review-dispatch root was not readable in the tracked graph",
+                           component="review-convergence")
+            continue
+        source_ref = review_sources.get(ref, ref)
+        finding = review_finding(ref[0], review_bead, source_ref)
+        if finding:
+            findings.append(finding)
+
     return findings, errors
 
 
 def receipt_findings(queue, checkpoint):
     findings = []
+    errors = []
     active = checkpoint.get("active") if isinstance(checkpoint, dict) else None
     active_id = active.get("attempt_id") if isinstance(active, dict) else None
     attempts_dir = queue.root / "attempts"
     if not attempts_dir.exists():
-        return findings
-    for folder in sorted(attempts_dir.iterdir()):
+        return findings, errors
+    folders = list(islice(attempts_dir.iterdir(), MAX_ATTEMPT_ROWS + 1))
+    if len(folders) > MAX_ATTEMPT_ROWS:
+        message = f"attempt receipt scan exceeded the {MAX_ATTEMPT_ROWS}-row bound; coverage is partial"
+        errors.append({"component": "receipt-scan", "message": message})
+        findings.append({"type": "tracking_error", "severity": "coordinator",
+                         "component": "receipt-scan", "rig": queue.config.get("rig"),
+                         "message": message})
+    folders = folders[:MAX_ATTEMPT_ROWS]
+    if active_id is not None:
+        try:
+            active_path = attempts_dir / label(active_id)
+        except ValueError:
+            active_path = None
+        if active_path is not None and active_path.is_dir() and active_path not in folders:
+            if len(folders) == MAX_ATTEMPT_ROWS:
+                folders[-1] = active_path
+            else:
+                folders.append(active_path)
+    for folder in folders:
         if not folder.is_dir():
             continue
         aid = folder.name
@@ -419,7 +855,7 @@ def receipt_findings(queue, checkpoint):
             "observation": (active or {}).get("observation") if aid == active_id else "non-active attempt has no exit receipt",
             "message": "retain the serial slot and original evidence for coordinator review",
         })
-    return findings
+    return findings, errors
 
 
 def unique_findings(items):
@@ -430,7 +866,16 @@ def unique_findings(items):
         key = finding_key(item)
         result.setdefault(key, {**item, "key": key})
     if len(result) > MAX_FINDINGS:
-        raise WatchdogError(f"observer found {len(result)} findings; bounded report limit is {MAX_FINDINGS}")
+        count = len(result)
+        retained = dict(list(result.items())[:MAX_FINDINGS - 1])
+        summary = {
+            "type": "tracking_error", "severity": "coordinator", "component": "finding-limit",
+            "rig": "city", "bead_id": "finding-limit",
+            "message": f"observer found {count} distinct findings; report is capped at {MAX_FINDINGS} with partial coverage",
+        }
+        key = finding_key(summary)
+        retained[key] = {**summary, "key": key}
+        result = retained
     return result
 
 
@@ -556,10 +1001,12 @@ def _run_locked(context, queue, runner, now):
     new_findings, order_errors = order_findings(context, context["target"], now, runner)
     findings.extend(new_findings)
     errors.extend(order_errors)
-    new_findings, review_errors = blocked_review_findings(context, context["target"], now, runner)
+    new_findings, review_errors = coordinator_responsibility_findings(context, context["target"], runner)
     findings.extend(new_findings)
     errors.extend(review_errors)
-    findings.extend(receipt_findings(queue, checkpoint))
+    new_findings, receipt_errors = receipt_findings(queue, checkpoint)
+    findings.extend(new_findings)
+    errors.extend(receipt_errors)
 
     if not context["coordinators"] and any(item.get("severity") == "coordinator" for item in findings):
         message = "queue config has no reviewer other than the George target; coordinator escalation is unavailable"
@@ -567,6 +1014,9 @@ def _run_locked(context, queue, runner, now):
         findings.append({"type": "observer_error", "severity": "george", "component": "reviewers",
                          "rig": context["rig"], "message": message})
     current = unique_findings(findings)
+    if any(item.get("component") == "finding-limit" for item in current.values()):
+        errors.append({"component": "finding-limit",
+                       "message": "observer finding report was capped; inspect retained partial-coverage finding"})
     state_path = queue.root / "watchdog-state.json"
     state = read_state(state_path)
     previous = state["findings"]

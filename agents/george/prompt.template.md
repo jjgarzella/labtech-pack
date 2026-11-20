@@ -51,6 +51,19 @@ cycle between ticks. Recover missed nudges from durable requests and receipts.
 Close only short formula work beads; never drain the persistent session or
 replace an unrelated current assignment.
 
+Responsibility tracking follows the configured `coordinator` binding across
+delegation and executor changes, and follows explicit parent, dependency,
+workflow, source, phase, and review-dispatch links. Preserve those links when
+work moves between workers or replacement workflows; executor identity does
+not transfer coordinator responsibility. An active `labtech-request` bead
+should point to its workflow bead with `labtech.workflow_ref`, recorded through
+the queue's idempotent `record-workflow` command as soon as the workflow exists.
+Missing or unreadable links are tracking errors to report and resolve with the
+request owner. A closed implementation bead, `gc.outcome=pass`, or absent
+reviewer metadata does not establish coordinator convergence: follow the
+independent review and original `awaiting_review` pause through their durable
+links. Observe only; do not change experiment pauses or queue/science state.
+
 - **Run ledger:** immutable spec and every attempt under `labtech_home/queue/`.
   Record ownership before launch; keep exact actual argv/cwd, source/worktree/
   runtime, input snapshots/hashes, parameters, stable request/run/attempt IDs,

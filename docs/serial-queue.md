@@ -20,12 +20,16 @@ Request and completion nudges provide prompt service between ticks.
 The scheduled observer uses Gas City's `no_work_gate = true` exec-order contract
 and its own filesystem lock. Each native immediate nudge is bounded to 60 seconds;
 the order's overall exec limit is 900 seconds. The configured maxima bound
-external command time to 830 seconds, including George plus eight configured
-reviewers, 24 rig scans, 12 linked-root lookups, and up to 90 seconds for queue
-host/process probes. The target does not need to appear in the reviewer list.
-First-time pause discovery follows `awaiting_review`
-beads through their durable coordinator, root, or linked-duty metadata instead
-of depending on a reviewer field that appears only after resume. It creates no
+external command time to 867 seconds, including George plus eight configured
+reviewers, up to 24 coordinator-filtered rig scans, 24 linked-bead lookups,
+12 workflow roots with two scoped pause queries each, and up to 90 seconds for
+queue host/process probes. The target does not need to appear in the reviewer
+list. Responsibility discovery starts from the configured coordinator binding
+and lab-book request beads, then follows explicit workflow, parent, dependency,
+delegation, source, and review-dispatch links. First-time pause discovery follows
+`awaiting_review` beads through those linked workflow roots instead of depending
+on reviewer metadata that may appear only after resume. An active request without
+a structured workflow link is reported as a tracking error. It creates no
 formula work roots; the scheduler's
 closed order-tracking receipts remain subject to the city's existing tracking
 sweep. The observer reads the effective importing-rig configuration and installed
@@ -63,6 +67,20 @@ reinitialization. Do not edit config/ledger to clear an occupied slot.
 Create an ordinary persistent request task in the served rig, parented to the
 existing lab book and labeled `labtech-request`. Use the task ID as request ID.
 Its text names the scope and actual authorization; it is not a new grant itself.
+When its implementation or workflow bead is known, register that durable link
+before handoff or queue submission. The helper validates the request's parent
+and label, verifies the target bead, writes `labtech.workflow_ref` once, and
+accepts an identical repeat without changing it:
+
+```sh
+python3 "$LABTECH_PACK/bin/serial_queue.py" --home "$LABTECH_HOME" record-workflow \
+  --request REQUEST_ID --workflow-rig RIG_NAME --workflow-id WORKFLOW_BEAD_ID
+```
+
+The reference uses the form `rig:<rig>/<bead-id>`. A different existing link is
+an error and must be reconciled by the request owner; the helper never overwrites
+it. Unsubmitted and preparing requests remain visible to George, so record the
+workflow reference as soon as the workflow bead exists.
 Other agents submit with `submit --request ID --spec /absolute/spec.json`.
 Submission seals input/executable hashes, stores the immutable spec and stable
 request/run IDs, links the bead to the ledger, and nudges George. Resubmitting the
