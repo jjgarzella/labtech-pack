@@ -342,6 +342,12 @@ def coordinator_binding(metadata, target):
     return None
 
 
+def has_coordinator_owner(metadata):
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return any(metadata.get(key) not in (None, "", False, "false", "0")
+               for key in COORDINATOR_METADATA_KEYS)
+
+
 def active_status(bead):
     return isinstance(bead, dict) and bead.get("status") in ACTIVE_STATUSES
 
@@ -1022,6 +1028,54 @@ def coordinator_responsibility_findings(context, target, runner):
                 or not retired_review_outcome(review_bead)):
             continue
         superseded_review_refs.add(predecessor)
+        successor_bead = graph_nodes[successor]
+        if not active_status(successor_bead):
+            continue
+
+        source_ref = review_sources.get(predecessor)
+        source_bead = graph_nodes.get(source_ref)
+        source_metadata = (source_bead.get("metadata")
+                           if isinstance(source_bead, dict)
+                           and isinstance(source_bead.get("metadata"), dict) else {})
+        source_owned = (coordinator_binding(source_metadata, target) is not None
+                        or (isinstance(source_bead, dict)
+                            and source_bead.get("assignee") == target))
+        successor_metadata = (successor_bead.get("metadata")
+                              if isinstance(successor_bead.get("metadata"), dict) else {})
+        successor_owned = (coordinator_binding(successor_metadata, target) is not None
+                           or successor_bead.get("assignee") == target)
+        successor_has_owner = has_coordinator_owner(successor_metadata)
+        if not (source_owned or successor_owned):
+            continue
+
+        # The current coordinator's replan successor is a workflow obligation,
+        # not an independent review until it dispatches its own review root.
+        mark_pause_root(successor, 0)
+        if source_owned and not successor_owned and not successor_has_owner:
+            inherited = active_responsibility_finding(successor[0], successor_bead, target)
+            if inherited:
+                inherited.update({
+                    "coordinator": target,
+                    "responsibility_owner": target,
+                    "responsibility_source": "inherited_successor",
+                    "coordinator_metadata_key": None,
+                    "inherited_from_workflow": (
+                        f"rig:{source_ref[0]}/{source_ref[1]}" if source_ref else None
+                    ),
+                    "message": (
+                        "coordinator responsibility continues through the explicit replan successor; "
+                        "assignee remains the current executor"
+                    ),
+                })
+                existing = next((finding for finding in findings
+                                 if finding.get("type") == inherited["type"]
+                                 and finding.get("rig") == successor[0]
+                                 and finding.get("bead_id") == successor[1]), None)
+                if existing is None:
+                    findings.append(inherited)
+                else:
+                    existing.update({key: value for key, value in inherited.items()
+                                     if key not in ("type", "severity", "rig", "bead_id", "title", "status", "assignee")})
 
     # A predecessor link is explicit history only when its anchor also
     # identifies a current review root. A predecessor reference alone must not

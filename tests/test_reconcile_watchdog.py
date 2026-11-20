@@ -929,6 +929,115 @@ class ReconcileWatchdogTests(unittest.TestCase):
                 finally:
                     fixture.close()
 
+    def setup_replan_successor(self, fixture, include_successor=True, first_pause=False):
+        fixture.owned_by_rig = {"NewtonExperiments": [{
+            "id": "closed-implementation", "status": "closed",
+            "metadata": {"coordinator": fixture.target, "gc.outcome": "pass",
+                         "gc.review_dispatch_root": "old-review"},
+            "dependencies": [],
+        }]}
+        fixture.linked_beads[("NewtonExperiments", "old-review")] = {
+            "id": "old-review", "status": "closed",
+            "metadata": {"gc.outcome": "skipped",
+                         "gc.review.loop_outcome": "replan",
+                         "replan_successor": "replacement-workflow"},
+            "dependencies": [],
+        }
+        if include_successor:
+            fixture.linked_beads[("NewtonExperiments", "replacement-workflow")] = {
+                "id": "replacement-workflow", "status": "in_progress",
+                "assignee": "NewtonExperiments/worker",
+                "metadata": {"gc.kind": "workflow"}, "dependencies": [],
+            }
+        if first_pause:
+            fixture.blocked_review["metadata"]["gc.root_bead_id"] = "replacement-workflow"
+
+    def test_replan_successor_inherits_workflow_duty_and_scans_first_pause(self):
+        for first_pause in (False, True):
+            with self.subTest(first_pause=first_pause):
+                fixture = Fixture()
+                self.setup_replan_successor(fixture, first_pause=first_pause)
+                try:
+                    with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                        result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                                       lambda _home: fixture.queue, fixture.now)
+                    successor_duties = [item for item in result["findings"]
+                                        if item.get("bead_id") == "replacement-workflow"
+                                        and item["type"] == "coordinator_responsibility"]
+                    self.assertEqual(len(successor_duties), 1)
+                    duty = successor_duties[0]
+                    self.assertEqual(duty["responsibility_owner"], fixture.target)
+                    self.assertEqual(duty["responsibility_source"], "inherited_successor")
+                    self.assertEqual(duty["coordinator"], fixture.target)
+                    self.assertIsNone(duty["coordinator_metadata_key"])
+                    self.assertEqual(duty["assignee"], "NewtonExperiments/worker")
+                    self.assertFalse(any(item["type"] == "active_independent_review"
+                                         and item["bead_id"] == "replacement-workflow"
+                                         for item in result["findings"]))
+                    self.assertFalse(any(item["type"] == "review_not_converged"
+                                         and item["bead_id"] == "old-review"
+                                         for item in result["findings"]))
+                    self.assertEqual(result["errors"], [])
+                    pause_queries = [argv for argv, _timeout in fixture.calls
+                                     if "gasvillage.pause_state=awaiting_review" in argv]
+                    self.assertTrue(any("gc.root_bead_id=replacement-workflow" in argv
+                                        for argv in pause_queries))
+                    pause_findings = [item for item in result["findings"]
+                                      if item["type"] == "blocked_review"
+                                      and item["bead_id"] == "blocked-review"]
+                    self.assertEqual(bool(pause_findings), first_pause)
+                    if first_pause:
+                        self.assertEqual(pause_findings[0]["root_bead_id"], "replacement-workflow")
+                finally:
+                    fixture.close()
+
+    def test_unreadable_replan_successor_retains_review_and_tracking_error(self):
+        fixture = Fixture()
+        self.setup_replan_successor(fixture, include_successor=False)
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            self.assertTrue(any(item["type"] == "review_not_converged"
+                                and item["bead_id"] == "old-review"
+                                for item in result["findings"]))
+            self.assertTrue(any(item["type"] == "tracking_error"
+                                and item.get("component") == "linked-bead"
+                                and "replan_successor" in item["message"]
+                                for item in result["findings"]))
+            self.assertFalse(any(item.get("bead_id") == "replacement-workflow"
+                                 and item["type"] == "coordinator_responsibility"
+                                 for item in result["findings"]))
+        finally:
+            fixture.close()
+
+    def test_replan_successor_duty_deduplication_keeps_store_identity(self):
+        fixture = Fixture()
+        self.setup_replan_successor(fixture)
+        fixture.owned_by_rig["DeRham"] = [{
+            "id": "replacement-workflow", "status": "in_progress",
+            "assignee": "DeRham/worker",
+            "metadata": {"coordinator": fixture.target}, "dependencies": [],
+        }]
+        try:
+            with patch.object(watchdog.shutil, "which", return_value=str(fixture.gc)):
+                result = watchdog.run_observer(fixture.env(), fixture.runner,
+                                               lambda _home: fixture.queue, fixture.now)
+            successor = next(item for item in result["findings"]
+                             if item["type"] == "coordinator_responsibility"
+                             and item["rig"] == "NewtonExperiments"
+                             and item["bead_id"] == "replacement-workflow")
+            other_store = next(item for item in result["findings"]
+                               if item["type"] == "coordinator_responsibility"
+                               and item["rig"] == "DeRham"
+                               and item["bead_id"] == "replacement-workflow")
+            self.assertEqual(successor["responsibility_source"], "inherited_successor")
+            self.assertEqual(successor["assignee"], "NewtonExperiments/worker")
+            self.assertEqual(other_store["responsibility_source"], "coordinator_metadata")
+            self.assertEqual(other_store["assignee"], "DeRham/worker")
+        finally:
+            fixture.close()
+
     def test_current_replan_with_readable_successor_reports_successor_not_history(self):
         fixture = Fixture()
         fixture.coordinator_root.update({
