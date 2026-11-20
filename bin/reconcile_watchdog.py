@@ -348,6 +348,15 @@ def has_coordinator_owner(metadata):
                for key in COORDINATOR_METADATA_KEYS)
 
 
+def has_conflicting_coordinator_owner(bead, target):
+    metadata = bead.get("metadata") if isinstance(bead, dict) else None
+    return (
+        has_coordinator_owner(metadata)
+        and coordinator_binding(metadata, target) is None
+        and bead.get("assignee") != target
+    )
+
+
 def active_status(bead):
     return isinstance(bead, dict) and bead.get("status") in ACTIVE_STATUSES
 
@@ -852,6 +861,7 @@ def coordinator_responsibility_findings(context, target, runner):
     pending_by_priority = [deque(), deque(), deque()]
     queued_priority = {}
     graph_nodes = {}
+    graph_priorities = {}
     visited = set()
     review_refs = set()
     review_sources = {}
@@ -867,6 +877,7 @@ def coordinator_responsibility_findings(context, target, runner):
     input_convoy_refs = set()
     attempted_refs = set()
     graph_lookups = 0
+    current_bridge_edges = []
 
     def mark_pause_root(ref, priority):
         previous = pause_roots.get(ref)
@@ -901,6 +912,7 @@ def coordinator_responsibility_findings(context, target, runner):
             break
         visited.add(key)
         graph_nodes[key] = bead
+        graph_priorities[key] = priority
         if bead.get("metadata") not in (None, {}) and not isinstance(bead.get("metadata"), dict):
             tracking_error(findings, errors, key[0], key[1],
                            "linked bead metadata has an unreadable non-object shape")
@@ -991,7 +1003,10 @@ def coordinator_responsibility_findings(context, target, runner):
                                f"cycle detected in explicit responsibility link to {ref[0]}/{ref[1]}; the repeated node was deduplicated",
                                component="linked-bead")
                 continue
+            current_bridge = relation in CURRENT_BRIDGE_RELATIONS and priority < 2
             if ref in visited:
+                if current_bridge:
+                    current_bridge_edges.append((key, ref))
                 continue
             if depth >= MAX_GRAPH_DEPTH:
                 tracking_error(findings, errors, key[0], key[1],
@@ -1001,8 +1016,12 @@ def coordinator_responsibility_findings(context, target, runner):
                 linked_bead, linked_role = seeds[ref]
                 linked_priority = linked_graph_priority(linked_bead, relation, priority)
                 enqueue(ref, linked_bead, depth + 1, linked_role, path | {ref}, linked_priority)
+                if current_bridge:
+                    current_bridge_edges.append((key, ref))
                 continue
             if ref in attempted_refs:
+                if current_bridge and (ref in graph_nodes or ref in queued_priority):
+                    current_bridge_edges.append((key, ref))
                 continue
             if graph_lookups >= MAX_GRAPH_LOOKUPS:
                 tracking_error(findings, errors, key[0], key[1],
@@ -1019,6 +1038,39 @@ def coordinator_responsibility_findings(context, target, runner):
                 continue
             linked_priority = linked_graph_priority(linked_bead, relation, priority)
             enqueue(ref, linked_bead, depth + 1, relation, path | {ref}, linked_priority)
+            if current_bridge:
+                current_bridge_edges.append((key, ref))
+
+    # Responsibility can be proven at a configured request or an owned bead,
+    # then carried over the graph's explicit current workflow bridges. Keep
+    # the original store-qualified anchor so delegated implementations do not
+    # need duplicate coordinator metadata to preserve the obligation.
+    responsibility_provenance = {}
+    for key, (bead, role) in seeds.items():
+        if (role in ("coordinator", "assignee", "request")
+                and responsibility_seed_priority(bead) < 2
+                and not has_conflicting_coordinator_owner(bead, target)):
+            responsibility_provenance.setdefault(key, set()).add(key)
+    for key, bead in graph_nodes.items():
+        metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+        if (graph_priorities.get(key, 2) < 2
+                and not has_conflicting_coordinator_owner(bead, target)
+                and (coordinator_binding(metadata, target) is not None
+                     or bead.get("assignee") == target)):
+            responsibility_provenance.setdefault(key, set()).add(key)
+    for _ in range(len(graph_nodes)):
+        changed = False
+        for source, ref in current_bridge_edges:
+            if (source not in responsibility_provenance or ref not in graph_nodes
+                    or has_conflicting_coordinator_owner(graph_nodes[ref], target)):
+                continue
+            anchors = responsibility_provenance[source]
+            existing = responsibility_provenance.setdefault(ref, set())
+            previous_count = len(existing)
+            existing.update(anchors)
+            changed = changed or len(existing) != previous_count
+        if not changed:
+            break
 
     superseded_review_refs = set()
     for predecessor, successor in review_successor_edges:
@@ -1033,27 +1085,37 @@ def coordinator_responsibility_findings(context, target, runner):
             continue
 
         source_ref = review_sources.get(predecessor)
-        source_bead = graph_nodes.get(source_ref)
-        source_metadata = (source_bead.get("metadata")
-                           if isinstance(source_bead, dict)
-                           and isinstance(source_bead.get("metadata"), dict) else {})
-        source_owned = (coordinator_binding(source_metadata, target) is not None
-                        or (isinstance(source_bead, dict)
-                            and source_bead.get("assignee") == target))
+        inherited_anchors = set(responsibility_provenance.get(predecessor, ()))
+        inherited_anchors.update(responsibility_provenance.get(source_ref, ()))
+        inherited_anchors.update(responsibility_provenance.get(successor, ()))
         successor_metadata = (successor_bead.get("metadata")
                               if isinstance(successor_bead.get("metadata"), dict) else {})
-        successor_owned = (coordinator_binding(successor_metadata, target) is not None
-                           or successor_bead.get("assignee") == target)
+        successor_binding = coordinator_binding(successor_metadata, target)
+        successor_assigned = successor_bead.get("assignee") == target
+        successor_owned = successor_binding is not None or successor_assigned
         successor_has_owner = has_coordinator_owner(successor_metadata)
-        if not (source_owned or successor_owned):
+        conflicting_successor_owner = has_conflicting_coordinator_owner(successor_bead, target)
+        if conflicting_successor_owner:
+            continue
+        if not (inherited_anchors or successor_owned):
             continue
 
         # The current coordinator's replan successor is a workflow obligation,
         # not an independent review until it dispatches its own review root.
         mark_pause_root(successor, 0)
-        if source_owned and not successor_owned and not successor_has_owner:
+        if successor_assigned and successor_binding is None:
+            assigned = active_responsibility_finding(successor[0], successor_bead, target)
+            if assigned and not any(
+                finding.get("type") == assigned["type"]
+                and finding.get("rig") == successor[0]
+                and finding.get("bead_id") == successor[1]
+                for finding in findings
+            ):
+                findings.append(assigned)
+        elif inherited_anchors and not successor_owned and not successor_has_owner:
             inherited = active_responsibility_finding(successor[0], successor_bead, target)
             if inherited:
+                responsibility_anchor = sorted(inherited_anchors)[0]
                 inherited.update({
                     "coordinator": target,
                     "responsibility_owner": target,
@@ -1062,6 +1124,7 @@ def coordinator_responsibility_findings(context, target, runner):
                     "inherited_from_workflow": (
                         f"rig:{source_ref[0]}/{source_ref[1]}" if source_ref else None
                     ),
+                    "responsibility_anchor": f"rig:{responsibility_anchor[0]}/{responsibility_anchor[1]}",
                     "message": (
                         "coordinator responsibility continues through the explicit replan successor; "
                         "assignee remains the current executor"
