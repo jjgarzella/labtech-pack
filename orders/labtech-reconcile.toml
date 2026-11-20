@@ -1,6 +1,7 @@
 [order]
-description = "Eight-hour serial-ledger reconciliation by persistent George; no experiment dispatch"
-formula = "labtech-reconcile"
+description = "12-hour independent ledger and coordinator-duty observer; no experiment dispatch"
+exec = 'python3 "$PACK_DIR/bin/reconcile_watchdog.py"'
 trigger = "cooldown"
-interval = "8h"
-pool = "labtech.george"
+interval = "12h"
+timeout = "900s"
+no_work_gate = true

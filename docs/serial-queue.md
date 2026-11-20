@@ -4,9 +4,34 @@
 session. It reconciles first, reviews explicitly submitted requests, starts at
 most one approved request, checkpoints, and returns to conversation and other
 assigned work. It never drains George or replaces his other coordination duties.
-The new `labtech-reconcile` order runs every **8 hours**, routed to that same
-session. Reconciliation only observes and checkpoints; it cannot launch, approve,
-or retry. Request and completion nudges provide prompt service between ticks.
+The `labtech-reconcile` order runs every **12 hours** as an independent bounded
+exec observer, so a stale open formula task cannot suppress the next check. It
+checkpoints the existing ledger, reports stale unclaimed reconciliation work,
+blocked duties explicitly awaiting George review, and uncertain run receipts.
+It may nudge George and configured reviewers with Gas City's bounded `immediate`
+delivery mode, retaining the native outcome as delivered-but-unverified,
+queued-without-delivery, or unknown. A nudge is not proof of execution. A queued
+reminder is not duplicated automatically; the observer exposes it in the order
+receipt and escalates it to the configured reviewer. The observer never launches,
+approves, retries, resumes, or changes held scientific work. George's
+`labtech-reconcile` formula remains available for explicit observation work.
+Request and completion nudges provide prompt service between ticks.
+
+The scheduled observer uses Gas City's `no_work_gate = true` exec-order contract
+and its own filesystem lock. Each native immediate nudge is bounded to 60 seconds;
+the order's overall exec limit is 900 seconds. The configured maxima bound
+external command time to 830 seconds, including George plus eight configured
+reviewers, 24 rig scans, 12 linked-root lookups, and up to 90 seconds for queue
+host/process probes. The target does not need to appear in the reviewer list.
+First-time pause discovery follows `awaiting_review`
+beads through their durable coordinator, root, or linked-duty metadata instead
+of depending on a reviewer field that appears only after resume. It creates no
+formula work roots; the scheduler's
+closed order-tracking receipts remain subject to the city's existing tracking
+sweep. The observer reads the effective importing-rig configuration and installed
+`PACK_DIR`; it does not guess queue, pack, city, rig, or lab-book paths. Its
+bounded state and notification receipts live at `queue/watchdog-state.json` and
+do not replace the scientific ledger or original coordinator-review records.
 
 The legacy `labtech-tick` formula/order is reference-only for this workflow. Do
 not enable it: it selects historical goals and changes scientific parameters.
