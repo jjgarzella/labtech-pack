@@ -81,6 +81,16 @@ NON_CYCLE_BACKLINK_RELATIONS = frozenset({
     "gc.root_bead_id",
     "gc.input_convoy_id",
 })
+CURRENT_BRIDGE_RELATIONS = frozenset({
+    "review",
+    "labtech.workflow_ref",
+    "gc.root_bead_id",
+    "gc.input_convoy_id",
+    "source_task",
+    "gc.source_work_bead",
+    "delegated_work_phase",
+    "replan_successor",
+})
 
 
 class WatchdogError(RuntimeError):
@@ -365,18 +375,9 @@ def responsibility_seed_priority(bead):
 def linked_graph_priority(bead, relation, source_priority):
     if active_status(bead):
         return 0
-    if relation == "review" and source_priority < 2:
-        return 1
+    if relation in CURRENT_BRIDGE_RELATIONS and source_priority < 2:
+        return source_priority
     return 2
-
-
-def retired_review(bead):
-    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
-    return bead.get("status") == "closed" and (
-        metadata.get("gc.outcome") in ("skipped", "abandoned")
-        or metadata.get("gc.review.loop_outcome") in ("replan", "skipped", "abandoned")
-        or metadata.get("work_outcome") in ("abandoned", "skipped")
-    )
 
 
 def rig_from_store_ref(context, current_rig, store_ref, component):
@@ -566,6 +567,18 @@ def review_converged(bead):
         and metadata.get("gc.review.loop_outcome") == "done"
         and metadata.get("gc.review.synthesis_verdict") == "pass"
         and metadata.get("gc.review.test_result") == "pass"
+    )
+
+
+def retired_review_outcome(bead):
+    """Return whether a closed review records a replan/retirement outcome."""
+    if not isinstance(bead, dict):
+        return False
+    metadata = bead.get("metadata") if isinstance(bead.get("metadata"), dict) else {}
+    return bead.get("status") == "closed" and (
+        metadata.get("gc.outcome") in ("skipped", "abandoned")
+        or metadata.get("gc.review.loop_outcome") in ("replan", "skipped", "abandoned")
+        or metadata.get("work_outcome") in ("abandoned", "skipped")
     )
 
 
@@ -837,11 +850,15 @@ def coordinator_responsibility_findings(context, target, runner):
     review_refs = set()
     review_sources = {}
     review_source_priorities = {}
+    review_source_anchors = {}
+    review_successor_edges = []
+    review_predecessor_edges = []
     pause_roots = {}
     blocking_refs = set()
     blocking_origins = {}
     blocking_edges = set()
     membership_edges = set()
+    input_convoy_refs = set()
     attempted_refs = set()
     graph_lookups = 0
 
@@ -929,15 +946,25 @@ def coordinator_responsibility_findings(context, target, runner):
                 blocking_edges.add((key, ref))
             if relation == "tracks":
                 membership_edges.add((key, ref))
+            if relation == "gc.input_convoy_id":
+                input_convoy_refs.add(ref)
             if relation == "review":
                 previous_priority = review_source_priorities.get(ref)
                 if previous_priority is None or priority < previous_priority:
                     review_source_priorities[ref] = priority
                     review_sources[ref] = key
+                review_source_anchors.setdefault(ref, set()).add(key)
+            if relation == "replan_successor":
+                review_successor_edges.append((key, ref))
+            if relation == "predecessor_review":
+                review_predecessor_edges.append((key, ref))
             if ref in path:
                 native_backlink = relation in NON_CYCLE_BACKLINK_RELATIONS and ref != key
+                # An explicitly referenced input convoy tracks its source as
+                # membership, regardless of whether the convoy is still open.
                 native_backlink = native_backlink or (
-                    relation == "tracks" and ref != key and bead.get("status") == "closed"
+                    relation == "tracks" and ref != key
+                    and bead.get("issue_type") == "convoy" and key in input_convoy_refs
                 )
                 native_backlink = native_backlink or (
                     relation in ("source_task", "gc.source_work_bead")
@@ -987,6 +1014,25 @@ def coordinator_responsibility_findings(context, target, runner):
             linked_priority = linked_graph_priority(linked_bead, relation, priority)
             enqueue(ref, linked_bead, depth + 1, relation, path | {ref}, linked_priority)
 
+    superseded_review_refs = set()
+    for predecessor, successor in review_successor_edges:
+        source_priority = review_source_priorities.get(predecessor)
+        review_bead = graph_nodes.get(predecessor)
+        if (source_priority is None or successor not in graph_nodes
+                or not retired_review_outcome(review_bead)):
+            continue
+        superseded_review_refs.add(predecessor)
+
+    # A predecessor link is explicit history only when its anchor also
+    # identifies a current review root. A predecessor reference alone must not
+    # retire an otherwise-current review root.
+    current_review_anchors = set(review_source_priorities)
+    for anchors in review_source_anchors.values():
+        current_review_anchors.update(anchors)
+    for anchor, predecessor in review_predecessor_edges:
+        if anchor in current_review_anchors:
+            superseded_review_refs.add(predecessor)
+
     for ref, source_priority in review_source_priorities.items():
         review_bead = graph_nodes.get(ref)
         if review_bead is None:
@@ -995,7 +1041,7 @@ def coordinator_responsibility_findings(context, target, runner):
                                "explicit review-dispatch root was not readable in the tracked graph",
                                component="review-convergence")
             continue
-        if retired_review(review_bead):
+        if ref in superseded_review_refs:
             continue
         if source_priority >= 2 and not active_status(review_bead):
             continue
